@@ -1,0 +1,125 @@
+# FleetPulse -- local development stack.
+#
+#   docker compose up --build            start everything
+#   docker compose ps                    check health
+#   docker compose logs -f dispatch-service
+#   docker compose --profile sim run --rm simulator --parcels 20
+#   docker compose down                  stop
+#   docker compose down -v               stop AND wipe the database
+#
+# Postgres and Redis run as containers here. On AWS, Postgres becomes RDS and
+# only the DATABASE_URL changes -- no application code changes.
+
+name: fleetpulse
+
+services:
+  # ==========================================================
+  # DATABASE
+  # ==========================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: fp-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fleetadmin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdevpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-fleetpulse}
+    ports:
+      - "5432:5432"          # so you can connect with pgAdmin / DBeaver / psql
+    volumes:
+      # Scripts here run automatically on FIRST start only. If you edit
+      # init.sql you must `docker compose down -v` to see the change.
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fleetadmin} -d ${POSTGRES_DB:-fleetpulse}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ==========================================================
+  # CACHE + GPS STORE
+  # ==========================================================
+  redis:
+    image: redis:7-alpine
+    container_name: fp-redis
+    # maxmemory protects a 1 GB EC2 box later: Redis evicts old keys instead
+    # of growing until the kernel OOM-kills something.
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ==========================================================
+  # SERVICE 1 -- Consignment & Hub  (system of record)
+  # ==========================================================
+  consignment-service:
+    build: ./services/consignment-service
+    container_name: fp-consignment
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fleetadmin}:${POSTGRES_PASSWORD:-localdevpassword}@postgres:5432/${POSTGRES_DB:-fleetpulse}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8001:8000"          # host 8001 -> container 8000
+    depends_on:
+      # service_healthy, not service_started: the app never boots against a
+      # half-ready database.
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    volumes:
+      # Live code reload while developing. Remove this and the `command`
+      # override below for a production-shaped run.
+      - ./services/consignment-service/app:/code/app
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    restart: unless-stopped
+
+  # ==========================================================
+  # SERVICE 2 -- Fleet & Dispatch  (last mile)
+  # ==========================================================
+  dispatch-service:
+    build: ./services/dispatch-service
+    container_name: fp-dispatch
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fleetadmin}:${POSTGRES_PASSWORD:-localdevpassword}@postgres:5432/${POSTGRES_DB:-fleetpulse}
+      REDIS_URL: redis://redis:6379/0
+      # How dispatch finds consignment. "consignment-service" is the service
+      # name above -- Docker's built-in DNS resolves it. Kubernetes resolves
+      # the identical URL via its own DNS, which is why no code changes when
+      # you move to k8s.
+      CONSIGNMENT_URL: http://consignment-service:8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8002:8000"
+    depends_on:
+      postgres:            { condition: service_healthy }
+      redis:               { condition: service_healthy }
+      consignment-service: { condition: service_started }
+    volumes:
+      - ./services/dispatch-service/app:/code/app
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    restart: unless-stopped
+
+  # ==========================================================
+  # TRAFFIC SIMULATOR  (profile: does not start with `up`)
+  #   docker compose --profile sim run --rm simulator --parcels 20
+  # ==========================================================
+  simulator:
+    profiles: ["sim"]
+    build: ./simulator
+    container_name: fp-simulator
+    environment:
+      # Internal service names, since this runs inside the Compose network.
+      CONSIGNMENT_URL: http://consignment-service:8000
+      DISPATCH_URL: http://dispatch-service:8000
+    depends_on:
+      consignment-service: { condition: service_started }
+      dispatch-service:    { condition: service_started }
+
+volumes:
+  pgdata:

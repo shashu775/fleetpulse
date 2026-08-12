@@ -2,123 +2,176 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Current state: design complete, zero implementation
+## What this is
 
-There is **no source code and there are zero commits.** The repo contains 8 config/scaffold files,
-9 design documents under `docs/`, and nothing else. Everything is untracked.
+A working two-service logistics platform (Delhivery-style parcel operations) built as a DevOps
+learning project. Python 3.12 + FastAPI, PostgreSQL, Redis, an nginx-served frontend, all under
+Docker Compose. Milestones 1–2 of `docs/FleetPulse-Simple.md` are complete; Terraform and CI are not
+built yet.
 
-There are **no build, lint, or test commands** because there is nothing to build. Do not infer any
-from directory names — `simulators/`, `infra/helm/`, `infra/terraform/`, `.github/workflows/`, and
-`infra/docker/prometheus/` are all empty. When you create the first runnable thing, replace this
-section with commands that actually work.
+**The repo has zero git commits.** Everything is untracked. Making the first commit is the user's
+step — do not commit unless asked.
 
-## ⚠️ The scaffold contradicts the active plan
+## Commands
 
-This is the most important thing to know before touching anything.
+Docker is the only prerequisite. **There is no working local Python** on this machine (`python`
+resolves to the Microsoft Store stub), so tests and the simulator run in containers.
 
-The committed files encode decisions from an earlier, larger design. The plan the user selected —
-`docs/FleetPulse-Simple.md` — **reverses most of them.** A future session that trusts the scaffold
-will build the wrong system.
+```bash
+docker compose up --build -d          # start everything -> http://localhost
+docker compose ps                     # health of all 5 containers
+docker compose logs -f dispatch-service
+docker compose down                   # stop
+docker compose down -v                # stop AND wipe the database
+```
 
-| Scaffold on disk says | Active plan (`FleetPulse-Simple.md`) says |
-|---|---|
-| 4 services (`consignment`, `facility`, `dispatch`, `notification`) | **2 services**: `consignment-service` (booking + hub scans) and `dispatch-service` (runsheets + GPS + delivery) |
-| `RABBITMQ_USER` / `RABBITMQ_PASS` in `.env.example` | **No message broker at all.** Services talk over synchronous HTTP REST |
-| `01-init-databases.sql` creates `consignment_db`, `facility_db`, `dispatch_db` | **One shared database**, two Postgres *schemas* (`consignment`, `dispatch`) |
-| Go or Node implied by `.gitignore` (`bin/`, `*.exe`, `node_modules/`) | **Python 3.12 + FastAPI** |
-| Language undecided | Decided: FastAPI, `psycopg` v3, `httpx`, `pytest` |
+### Tests
 
-**Follow the plan, not the scaffold.** Concretely, when implementation starts:
+Each service image has a `test` stage. 36 tests total (15 consignment, 21 dispatch).
 
-- Delete `services/facility-service/` and `services/notification-service/`. Facility responsibilities
-  fold into `consignment-service`; notification becomes a later optional add-on with a *different*
-  design (see below).
-- Rewrite `.env.example` — drop the `RABBITMQ_*` keys, add `DATABASE_URL`, `REDIS_URL`,
-  `CONSIGNMENT_URL`.
-- Replace `infra/docker/postgres-init/01-init-databases.sql` with `db/init.sql` creating two schemas
-  in one database.
-- Replace all four placeholder Dockerfiles. They are identical no-ops:
-  ```dockerfile
-  FROM alpine:latest
-  CMD ["echo", "Service running..."]
-  ```
+```bash
+docker build --target test -t fp-consignment-test ./services/consignment-service
+docker run --rm fp-consignment-test
 
-## Which document to follow
+docker build --target test -t fp-dispatch-test ./services/dispatch-service
+docker run --rm fp-dispatch-test
 
-Nine documents exist because requirements changed several times during design. Only three are live.
+# One test / one pattern:
+docker run --rm fp-dispatch-test pytest -q -k gps
+docker run --rm fp-consignment-test pytest -q tests/test_waybills.py::test_health_returns_ok
+```
 
-| Document | Status |
-|---|---|
-| **`docs/FleetPulse-Simple.md`** | ⭐ **The plan. Build from this.** 2 services, Compose, Terraform, GitHub Actions, 4 milestones |
-| **`docs/FleetPulse-Architecture.md`** | ⭐ How the system works — request flows, failure behaviour. Read alongside Simple |
-| `docs/FleetPulse-Kubernetes.md` | Active. Milestones 5–8, after Simple works. minikube + EKS |
-| `docs/FleetPulse-Addon-Observability.md` | Optional add-on, after the core works |
-| `docs/FleetPulse-Addon-Notification.md` | Optional add-on. A 3rd service using a **transactional outbox**, not a queue consumer |
-| `docs/FleetPulse-Blueprint.md` | ❌ Superseded. 4 services, RabbitMQ, EKS, 14 weeks — too large |
-| `docs/FleetPulse-Zero-Cost.md` | ❌ Superseded by Simple. Used K3s + 4 services + NATS |
-| `docs/FleetPulse-EventBridge.md` | ⚠️ Off-path. Only relevant if brokers are revisited |
-| `docs/FleetPulse-Cost-Model.md` | 📖 Reference. AWS pricing at production scale, not this build |
+Tests need **no database and no Redis**: `TestClient(app)` is used *without* a context manager so
+FastAPI's lifespan never runs, and validation cases are rejected by Pydantic before any handler
+executes. Preserve that property — a test that reaches a handler needing a live pool will fail with
+a `RuntimeError` about `DATABASE_URL`.
 
-Do not reconcile the superseded documents with the active ones — they answer a different question
-and are kept for their reasoning, not their instructions.
+### Traffic simulator
 
-## Architecture of the active plan
+```bash
+docker compose --profile sim run --rm simulator --parcels 20
+docker compose --profile sim run --rm simulator --parcels 12 --seed 42   # reproducible
+```
 
-Two FastAPI services. One shared PostgreSQL database with a schema per service. Redis for the
-tracking cache and live GPS positions.
+Books parcels, scans them through hubs, creates runsheets, streams GPS, delivers/RTOs. The fastest
+way to put realistic data behind the UI.
 
-**The dependency graph is one-directional: `dispatch-service` → `consignment-service`.** Consignment
-never calls Dispatch. Preserve this — circular service dependencies cause startup ordering and
-cascading-timeout problems.
+### Database
 
-**`consignment-service` is the system of record for parcel status.** It owns `ALLOWED_TRANSITIONS`,
-the state machine that rejects illegal moves with HTTP 409. Dispatch drives the last three
-transitions (`OUT_FOR_DELIVERY`, `DELIVERED`, `RTO`) but performs none of them — it calls
-`PATCH /api/v1/waybills/{awb}/status`.
+```bash
+docker compose exec postgres psql -U fleetadmin -d fleetpulse
+docker compose exec postgres psql -U fleetadmin -d fleetpulse -c "\dt consignment.*"
+```
 
-**Dispatch must never write to the `consignment` schema**, even though the connection and
-credentials make it trivially possible. The state machine must have exactly one enforcement point.
-This single constraint is what makes the project microservices rather than one app in two folders.
+`db/init.sql` runs **only on a fresh volume**. After editing it: `docker compose down -v && docker compose up -d`.
 
-Two data-placement decisions worth preserving:
+## Architecture
 
-- **GPS pings go to Redis only, never Postgres.** 100 vehicles at one ping per 10s is ~864k writes
-  per day of data whose value expires in seconds. The GPS endpoint returns `202 Accepted`, not
-  `201`, because the write is deliberately non-durable.
-- **`scan_events` is append-only.** `waybills.current_status` is a denormalised convenience column;
-  the event table is the truth and could rebuild it.
+```
+http://localhost (nginx)  ──┬─ static UI (frontend/)
+                            ├─ /api/consignment/v1/*  ->  consignment-service:8000/api/v1/*
+                            └─ /api/dispatch/v1/*     ->  dispatch-service:8000/api/v1/*
 
-**Failure behaviour is reported honestly rather than hidden.** Without a broker there is no
-cross-service transaction, so `POST /runsheets` returns `assigned[]` and `failed[]` lists, and
-`POST /delivery` can return `207 Multi-Status`. Do not "fix" these by swallowing errors — the
-notification add-on's outbox pattern is the intended solution.
+consignment-service :8001  ── owns parcels + THE STATE MACHINE
+dispatch-service    :8002  ── owns runsheets/GPS/delivery, calls consignment over HTTP
+PostgreSQL          :5432  ── one database, schemas `consignment` and `dispatch`
+Redis               :6379  ── tracking cache (consignment) + live GPS (dispatch)
+```
 
-## Every existing file has a UTF-8 BOM
+### The rule that defines this codebase
 
-All 8 scaffold files were written by PowerShell on Windows and begin with `U+FEFF`, including the
-Dockerfiles and `01-init-databases.sql`. A BOM ahead of `FROM` or `CREATE DATABASE` breaks the tools
-that consume them.
+**`dispatch-service` must never write to the `consignment` schema.** Same database, same
+credentials, trivially possible — and forbidden. `consignment-service` owns `ALLOWED_TRANSITIONS`
+(`services/consignment-service/app/main.py`), the state machine that returns **409** on illegal
+moves. If dispatch wrote directly, that rule would live in two places and eventually disagree.
 
-The Write tool does not add a BOM; `Out-File` and `Set-Content -Encoding utf8` in Windows PowerShell
-5.1 do. If you hit an unexplained syntax error on line 1 of anything, check for a BOM first.
+All cross-service traffic goes through
+`services/dispatch-service/app/consignment_client.py` — the only inter-service call in the system.
+Dependencies are **one-directional**: dispatch → consignment, never the reverse.
 
-## Configuration contract
+### Parcel state machine
 
-`.env.example` is the contract; `.env` is gitignored. When code needs a new variable, add it to
-`.env.example` with a safe placeholder **in the same change**.
+`MANIFESTED → IN_TRANSIT → ARRIVED_AT_FACILITY → OUT_FOR_DELIVERY → DELIVERED | RTO`, with an
+`ARRIVED_AT_FACILITY ⇄ IN_TRANSIT` loop for multi-hub routes. Consignment drives the first three via
+`POST /api/v1/scans`; dispatch drives the last three via `PATCH /api/v1/waybills/{awb}/status`.
 
-Current keys are stale (see the scaffold-contradiction table above). The plan's set is in
-`FleetPulse-Simple.md` §2.4.
+`_apply_transition()` holds the row with `SELECT ... FOR UPDATE` so two concurrent scans cannot both
+read the old status and both conclude their move is legal.
+
+### The two Redis roles are deliberately different
+
+| | consignment `app/cache.py` | dispatch `app/cache.py` |
+|---|---|---|
+| Role | **Cache** — Postgres is the truth | **Store** — nothing else holds GPS |
+| On failure | Fails soft: logs, returns `None`, behaves like a miss | Propagates: endpoints return **503** |
+
+Do not "harmonise" these. A cache that can take down the service is worse than no cache; a store
+that silently discards writes is worse than an error.
+
+Cache invalidation is `DEL`, never overwrite — safe if the surrounding transaction rolls back.
+`GET /api/v1/waybills/{awb}` returns a `_cache: HIT|MISS` field, which the UI displays.
+
+### Deliberate design choices that look like omissions
+
+- **No `gps_pings` table.** ~864k writes/day of data stale in 10 seconds. Redis only, 1-hour TTL.
+  `POST /api/v1/gps` returns **202 Accepted**, not 201, because the write is non-durable.
+- **`delivery_attempts.awb` has no foreign key** to `consignment.waybills` — a real FK would couple
+  the schemas at the database level and block a future service split.
+- **`scan_events` is append-only.** `waybills.current_status` is a denormalised convenience column
+  rebuildable from it.
+- **Partial failure is reported, not hidden.** `POST /runsheets` returns `assigned[]` *and*
+  `failed[]`; `POST /delivery` returns **207 Multi-Status** when the attempt saved but the status
+  update failed. These are not bugs — without a broker there is no cross-service transaction. The
+  intended fix is the outbox pattern in `docs/FleetPulse-Addon-Notification.md`.
+- **`/api/v1/waybills` list is capped at `limit=100`** via `Query(le=100)`.
+
+### Frontend
+
+`frontend/` is plain HTML/CSS/JS — **no framework, no build step, no `node_modules`**. nginx serves
+three files and proxies both APIs under one origin, which is why there is no CORS configuration
+anywhere. Keep it that way; adding a bundler would add a toolchain this project deliberately avoids.
+
+`frontend/nginx.conf` rewrites `/api/consignment/` → `/api/` on the upstream, so the browser calls
+`/api/consignment/v1/waybills` and the service sees `/api/v1/waybills`.
+
+## Conventions
+
+- **`.env.example` is the contract.** New env var in code → add it there with a safe placeholder in
+  the same change. `docker-compose.yml` also carries defaults, so the stack starts without a `.env`.
+- **Service discovery uses service names** (`http://consignment-service:8000`). Docker Compose DNS
+  and Kubernetes DNS both resolve it, which is why no code changes when moving to a cluster.
+- **Missing config fails loudly.** `db.py` raises a `RuntimeError` naming the variable and the fix,
+  not a bare `KeyError`.
+- **No CPU limits on containers**, memory limits only — CPU limits cause throttling that presents as
+  mysterious latency.
+- `services/*/app/db.py` is intentionally duplicated across the two services rather than shared;
+  two small helpers do not justify a shared library, and copying keeps each independently deployable.
 
 ## Environment
 
-Windows 11, PowerShell 5.1 primary. Bash is available but takes POSIX syntax — `&&` and `||` are
-parser errors in PowerShell, and here-strings need `@'...'@` with the terminator at column 0.
+Windows 11, PowerShell 5.1 primary; the Bash tool is also available and takes POSIX syntax. In
+PowerShell, `&&` and `||` are parser errors, and `eval $(minikube docker-env)` must be
+`minikube docker-env | Invoke-Expression`.
 
-Kubernetes work targets minikube on Docker Desktop; `eval $(minikube docker-env)` does not work in
-PowerShell — use `minikube docker-env | Invoke-Expression`.
+## Documentation
 
-## Git
+`docs/` holds nine design documents from an evolving design. Only these are live:
 
-Initialized, `master` branch, **no commits, no remote.** Making the first commit is Milestone 1 of
-the active plan and is the user's step to take — do not commit unless asked.
+| Document | Role |
+|---|---|
+| `FleetPulse-Simple.md` | The plan this code implements |
+| `FleetPulse-Architecture.md` | Request flows and failure behaviour |
+| `FleetPulse-Kubernetes.md` | Next: minikube + EKS (Milestones 5–8) |
+| `FleetPulse-Addon-Observability.md` | Optional: metrics, dashboards, tracing |
+| `FleetPulse-Addon-Notification.md` | Optional: 3rd service via transactional outbox |
+
+`FleetPulse-Blueprint.md` and `FleetPulse-Zero-Cost.md` are **superseded** (4 services, RabbitMQ,
+K3s); `FleetPulse-EventBridge.md` is off-path; `FleetPulse-Cost-Model.md` is production-scale
+pricing reference. Do not reconcile the superseded documents with the code — they answer a
+different question.
+
+## Not built yet
+
+Milestone 3 (Terraform: VPC, EC2, RDS, ECR) and Milestone 4 (GitHub Actions: test → build → ECR →
+deploy) are specified in `FleetPulse-Simple.md` §4 and §3 but have no files in the repo. There is
+no `infra/` directory, no `.github/workflows/`, and no `docker-compose.prod.yml`.

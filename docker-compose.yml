@@ -106,6 +106,22 @@ services:
     restart: unless-stopped
 
   # ==========================================================
+  # FRONTEND -- the single entry point: http://localhost
+  #
+  # Serves the UI and proxies both APIs under one origin, so the browser
+  # makes same-origin requests and there is no CORS anywhere in the project.
+  # ==========================================================
+  frontend:
+    build: ./frontend
+    container_name: fp-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      consignment-service: { condition: service_started }
+      dispatch-service:    { condition: service_started }
+    restart: unless-stopped
+
+  # ==========================================================
   # TRAFFIC SIMULATOR  (profile: does not start with `up`)
   #   docker compose --profile sim run --rm simulator --parcels 20
   # ==========================================================

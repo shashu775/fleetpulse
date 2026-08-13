@@ -68,6 +68,22 @@ CREATE TABLE IF NOT EXISTS dispatch.runsheets (
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
+-- What is actually ON a runsheet. Without this, a driver app cannot answer
+-- "what am I delivering today?" -- delivery_attempts only records parcels that
+-- have already been attempted, which is the wrong end of the workflow.
+CREATE TABLE IF NOT EXISTS dispatch.runsheet_items (
+    runsheet_id  VARCHAR(40) NOT NULL REFERENCES dispatch.runsheets(id),
+    awb          VARCHAR(20) NOT NULL,      -- no FK: cross-schema, see below
+    sequence     INTEGER     NOT NULL,      -- delivery order on the route
+    status       VARCHAR(20) NOT NULL DEFAULT 'PENDING',  -- PENDING|DELIVERED|RTO
+    added_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (runsheet_id, awb)
+);
+
+-- The driver app's main query: "my pending stops, in route order".
+CREATE INDEX IF NOT EXISTS idx_items_runsheet_status
+    ON dispatch.runsheet_items (runsheet_id, status, sequence);
+
 CREATE TABLE IF NOT EXISTS dispatch.delivery_attempts (
     id           BIGSERIAL   PRIMARY KEY,
     -- Deliberately NO foreign key to consignment.waybills. A real FK would
@@ -77,6 +93,12 @@ CREATE TABLE IF NOT EXISTS dispatch.delivery_attempts (
     runsheet_id  VARCHAR(40) NOT NULL REFERENCES dispatch.runsheets(id),
     outcome      VARCHAR(20) NOT NULL,                  -- DELIVERED | RTO
     reason       TEXT,
+    -- Proof of delivery, captured by the driver app.
+    pod_type     VARCHAR(20),                           -- OTP | SIGNATURE | PHOTO
+    pod_receiver VARCHAR(120),                          -- who actually took it
+    -- Signature strokes as a data URL. Fine at this scale; a real system would
+    -- put the image in S3 and store only the key.
+    pod_data     TEXT,
     attempted_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

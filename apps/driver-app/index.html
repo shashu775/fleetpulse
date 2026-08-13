@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover + user-scalable=no: this is used one-handed on a phone
+     in a vehicle. Accidental pinch-zoom while tapping is a real annoyance. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#1f6feb">
+<title>FleetPulse Driver</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚚</text></svg>">
+<link rel="stylesheet" href="./base.css">
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="mark">FP</span>
+    <div>
+      <h1>Driver</h1>
+      <p id="driver-label">Not signed in</p>
+    </div>
+  </div>
+  <div class="appbar-actions">
+    <span class="svc" id="svc-dispatch">dispatch</span>
+    <button class="btn ghost sm" id="switch-driver" hidden>Switch</button>
+  </div>
+</header>
+
+<main class="narrow">
+
+  <!-- ===== 1. Pick a driver (stands in for login) ===== -->
+  <section id="view-login">
+    <div class="card">
+      <h2 style="margin-top:0">Who is driving?</h2>
+      <p class="muted small">
+        Pick your name to load today's runsheets. This is a demo identity picker,
+        not authentication — see the note in the footer.
+      </p>
+      <div id="driver-list" class="driver-list"></div>
+      <div id="no-drivers" class="empty" hidden>
+        No drivers yet. Create a runsheet first:
+        <code>docker compose --profile sim run --rm simulator --parcels 20</code>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 2. Runsheet list ===== -->
+  <section id="view-runsheets" hidden>
+    <div class="card-head" style="margin-bottom:12px">
+      <h2 style="margin:0;font-size:17px">Your runsheets</h2>
+      <button class="btn ghost sm" id="refresh-runsheets">Refresh</button>
+    </div>
+    <div id="runsheet-list"></div>
+    <div id="no-runsheets" class="empty" hidden>No runsheets assigned to you.</div>
+  </section>
+
+  <!-- ===== 3. Stops on one runsheet ===== -->
+  <section id="view-stops" hidden>
+    <button class="btn ghost sm" id="back-to-runsheets" style="margin-bottom:12px">← Runsheets</button>
+
+    <div class="card" id="runsheet-summary"></div>
+
+    <div class="gps-bar card">
+      <div>
+        <div style="font-weight:600">GPS reporting</div>
+        <div class="small muted" id="gps-status">Off — positions are not being sent</div>
+      </div>
+      <label class="switch none">
+        <input type="checkbox" id="gps-toggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <h3 class="section-label">Stops</h3>
+    <div id="stop-list"></div>
+  </section>
+
+</main>
+
+<!-- ===== Proof-of-delivery sheet ===== -->
+<div class="modal-backdrop" id="pod-modal" hidden>
+  <div class="modal">
+    <h2>Complete delivery</h2>
+    <p class="muted small mono" id="pod-awb"></p>
+
+    <div class="seg" id="pod-outcome">
+      <button class="seg-btn is-active" data-outcome="DELIVERED">Delivered</button>
+      <button class="seg-btn" data-outcome="RTO">Return (RTO)</button>
+    </div>
+
+    <!-- Delivered: capture proof -->
+    <div id="pod-delivered">
+      <div class="seg small" id="pod-type">
+        <button class="seg-btn is-active" data-type="OTP">OTP</button>
+        <button class="seg-btn" data-type="SIGNATURE">Signature</button>
+      </div>
+
+      <div id="pod-otp-block" style="margin-top:12px">
+        <label>OTP from consignee
+          <input id="pod-otp" class="mono" inputmode="numeric" maxlength="6"
+                 placeholder="6-digit code" autocomplete="one-time-code">
+        </label>
+      </div>
+
+      <div id="pod-sig-block" style="margin-top:12px" hidden>
+        <label style="margin-bottom:6px">Signature</label>
+        <canvas id="sig-canvas" class="sig"></canvas>
+        <button class="btn ghost sm" id="sig-clear" style="margin-top:8px">Clear</button>
+      </div>
+
+      <label style="margin-top:12px">Received by
+        <input id="pod-receiver" placeholder="Name of the person who took it">
+      </label>
+    </div>
+
+    <!-- RTO: capture a reason -->
+    <div id="pod-rto" hidden style="margin-top:12px">
+      <label>Reason for return
+        <select id="rto-reason">
+          <option>Consignee unavailable</option>
+          <option>Address incorrect</option>
+          <option>Refused delivery</option>
+          <option>Premises closed</option>
+          <option>Consignee asked to reschedule</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="pod-error" class="alert" hidden style="margin-top:12px"></div>
+
+    <div class="row" style="margin-top:18px">
+      <button class="btn ghost" id="pod-cancel">Cancel</button>
+      <button class="btn ok" id="pod-submit">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<footer>
+  FleetPulse Driver ·
+  <b>No authentication:</b> the driver picker is a demo identity, not a login.
+  Anyone reaching this page can act as any driver.
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

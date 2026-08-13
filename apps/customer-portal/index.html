@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1f6feb">
+<meta name="description" content="Track your FleetPulse shipment with your AWB number.">
+<title>Track your shipment — FleetPulse</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>">
+<link rel="stylesheet" href="./base.css">
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="mark">FP</span>
+    <div>
+      <h1>FleetPulse</h1>
+      <p>Shipment tracking</p>
+    </div>
+  </div>
+</header>
+
+<main class="narrow">
+
+  <!-- ===== Hero search ===== -->
+  <section class="hero">
+    <h2>Where is my parcel?</h2>
+    <p class="muted">Enter the AWB number from your shipping confirmation.</p>
+
+    <form id="track-form" class="track-form">
+      <input id="awb-input" class="mono" type="text" inputmode="latin"
+             placeholder="FP1234567890" autocomplete="off" spellcheck="false"
+             aria-label="AWB number" required>
+      <button class="btn" type="submit">Track</button>
+    </form>
+
+    <p class="small muted" id="recent-hint" hidden>
+      Recently tracked: <span id="recent-links"></span>
+    </p>
+  </section>
+
+  <!-- ===== Loading ===== -->
+  <div id="loading" class="loading" hidden>
+    <span class="spinner"></span> Looking up your shipment…
+  </div>
+
+  <!-- ===== Not found / error ===== -->
+  <div id="error-box" class="alert" hidden></div>
+
+  <!-- ===== Result ===== -->
+  <section id="result" hidden>
+
+    <!-- Status headline -->
+    <div class="status-hero" id="status-hero">
+      <div class="status-icon" id="status-icon">📦</div>
+      <div>
+        <div class="status-title" id="status-title"></div>
+        <div class="status-sub muted" id="status-sub"></div>
+      </div>
+    </div>
+
+    <!-- Progress rail -->
+    <div class="card">
+      <ol class="rail" id="rail"></ol>
+    </div>
+
+    <!-- Shipment summary -->
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="awb" id="r-awb"></div>
+          <div class="small muted" id="r-route"></div>
+        </div>
+        <span id="r-badge"></span>
+      </div>
+      <div class="kv-grid" id="r-details"></div>
+    </div>
+
+    <!-- Full history -->
+    <div class="card">
+      <h3 class="section-label">Shipment history</h3>
+      <ol class="timeline" id="r-timeline"></ol>
+    </div>
+
+    <p class="small muted" style="text-align:center;margin-top:18px">
+      Last updated <span id="r-updated"></span> ·
+      <button class="btn ghost sm" id="refresh">Refresh</button>
+    </p>
+  </section>
+
+</main>
+
+<footer>
+  FleetPulse — a DevOps learning project. Not a real courier service.
+  <br>
+  This page is public and read-only: it shows only what an AWB number unlocks.
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

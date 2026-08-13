@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FleetPulse</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>">
+<link rel="stylesheet" href="/base.css">
+<style>
+  .hero { text-align: center; padding: 46px 20px 34px; }
+  .hero h1 { margin: 0 0 8px; font-size: clamp(26px, 6vw, 38px); letter-spacing: -1px; }
+  .hero p { margin: 0 auto; max-width: 560px; color: var(--muted); }
+  .apps { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+  .app {
+    display: block; text-decoration: none; color: inherit;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 22px; box-shadow: var(--shadow);
+    transition: border-color .15s, transform .15s;
+  }
+  .app:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .app .icon { font-size: 30px; line-height: 1; }
+  .app h2 { margin: 12px 0 5px; font-size: 17px; }
+  .app p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+  .app .who {
+    display: inline-block; margin-top: 12px; padding: 4px 10px;
+    background: var(--accent-sub); color: var(--accent);
+    border-radius: 999px; font: 700 11px/1.3 var(--mono);
+  }
+  .status-row { display: flex; gap: 8px; justify-content: center; margin-top: 18px; flex-wrap: wrap; }
+  .links { text-align: center; margin-top: 30px; }
+  .links a { margin: 0 10px; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>FleetPulse</h1>
+  <p>A logistics platform modelling Delhivery-style parcel operations.
+     Four interfaces over two shared microservices.</p>
+  <div class="status-row">
+    <span class="svc" id="svc-consignment">consignment</span>
+    <span class="svc" id="svc-dispatch">dispatch</span>
+  </div>
+</div>
+
+<main>
+  <div class="apps">
+
+    <a class="app" href="/merchant/">
+      <div class="icon">🏪</div>
+      <h2>Merchant Portal</h2>
+      <p>Book shipments, generate labels, and follow orders end to end.</p>
+      <span class="who">SELLERS</span>
+    </a>
+
+    <a class="app" href="/hub/">
+      <div class="icon">🏭</div>
+      <h2>Hub Scanner</h2>
+      <p>High-speed inbound and outbound scanning for sorting facilities.</p>
+      <span class="who">HUB OPERATORS</span>
+    </a>
+
+    <a class="app" href="/driver/">
+      <div class="icon">🚚</div>
+      <h2>Driver App</h2>
+      <p>Daily runsheets, out-for-delivery scans, OTP and signature proof of delivery, live GPS.</p>
+      <span class="who">FIELD EXECUTIVES</span>
+    </a>
+
+    <a class="app" href="/track/">
+      <div class="icon">📦</div>
+      <h2>Track a Shipment</h2>
+      <p>Public tracking — enter an AWB number to see live status and history.</p>
+      <span class="who">CUSTOMERS</span>
+    </a>
+
+    <a class="app" href="/admin/">
+      <div class="icon">🎛️</div>
+      <h2>Admin Console</h2>
+      <p>Network-wide operations: every parcel, live fleet, and runsheet creation.</p>
+      <span class="who">OPERATIONS</span>
+    </a>
+
+  </div>
+
+  <div class="links">
+    <a href="http://localhost:8001/docs" target="_blank" rel="noopener">Consignment API docs ↗</a>
+    <a href="http://localhost:8002/docs" target="_blank" rel="noopener">Dispatch API docs ↗</a>
+  </div>
+</main>
+
+<footer style="text-align:center">
+  FleetPulse — a DevOps learning project. Not a real courier service.
+  <br>No authentication: every app is open to anyone who can reach this page.
+</footer>
+
+<script type="module">
+  // Inline rather than importing ui.js: the gateway ships only base.css, so
+  // this page stays dependency-free.
+  async function poll() {
+    for (const svc of ["consignment", "dispatch"]) {
+      const el = document.getElementById(`svc-${svc}`);
+      try {
+        const r = await fetch(`/health/${svc}`);
+        el.className = `svc ${r.ok ? "up" : "down"}`;
+      } catch {
+        el.className = "svc down";
+      }
+    }
+  }
+  poll();
+  setInterval(poll, 10000);
+</script>
+</body>
+</html>

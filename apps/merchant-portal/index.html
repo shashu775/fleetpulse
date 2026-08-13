@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FleetPulse Merchant Portal</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏪</text></svg>">
+<link rel="stylesheet" href="./base.css">
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="mark">FP</span>
+    <div><h1>Merchant Portal</h1><p>Sellers &amp; brands</p></div>
+  </div>
+  <div class="appbar-actions">
+    <span class="svc" id="svc-consignment">consignment</span>
+  </div>
+</header>
+
+<main>
+  <!-- Working today: single booking, reusing the existing endpoint. -->
+  <div class="card">
+    <div class="card-head">
+      <h2 style="margin:0;font-size:17px">Book a shipment</h2>
+      <span class="badge ok">Working</span>
+    </div>
+    <p class="muted small">Single-order booking against <code>POST /api/v1/waybills</code>.</p>
+
+    <form id="book-form" style="margin-top:14px">
+      <div class="form-grid">
+        <label>Merchant<input name="merchant_name" value="Nykaa" required></label>
+        <label>Consignee<input name="consignee_name" value="Ravi Kumar" required></label>
+        <label>Phone<input name="consignee_phone" value="9876543210" minlength="10" maxlength="15" required></label>
+        <label>Weight (g)<input name="weight_grams" type="number" value="900" min="1" max="50000" required></label>
+        <label style="grid-column:1/-1">Address<input name="consignee_addr" value="12 MG Road, Bengaluru" required></label>
+        <label>Origin hub<select name="origin_hub" id="origin-hub"></select></label>
+        <label>Destination hub<select name="destination_hub" id="dest-hub"></select></label>
+        <label>Payment<select name="payment_mode" id="pay"><option>COD</option><option>PREPAID</option></select></label>
+        <label id="cod-wrap">COD amount (₹)<input name="cod_amount" type="number" value="1499" min="0" step="0.01"></label>
+      </div>
+      <button class="btn" type="submit" style="margin-top:14px">Book shipment</button>
+    </form>
+
+    <div id="book-out" style="margin-top:14px" hidden></div>
+  </div>
+
+  <!-- Honest about what is not built. -->
+  <div class="card">
+    <div class="card-head">
+      <h2 style="margin:0;font-size:17px">Planned</h2>
+      <span class="badge warn">Not built</span>
+    </div>
+    <p class="muted small">
+      These need backend endpoints that do not exist yet — see
+      <code>docs/FleetPulse-Apps.md</code> §2 for the full specification.
+    </p>
+    <ul class="small muted" style="line-height:2;margin:10px 0 0">
+      <li><b>Bulk order upload</b> — CSV in, many AWBs out · <code>POST /api/v1/waybills/bulk</code></li>
+      <li><b>Barcode label sheets</b> — Code128 AWBs, N-up for a label printer</li>
+      <li><b>Pickup requests</b> — schedule a collection · <code>POST /api/v1/pickups</code></li>
+      <li><b>Shipment dashboard</b> — filter, export, NDR follow-up</li>
+      <li><b>Merchant authentication</b> — real accounts, scoped to own shipments</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 8px;font-size:17px">Other apps</h2>
+    <div class="row" style="flex-wrap:wrap">
+      <a class="btn ghost" href="/driver/">Driver app</a>
+      <a class="btn ghost" href="/hub/">Hub app</a>
+      <a class="btn ghost" href="/admin/">Admin console</a>
+      <a class="btn ghost" href="/track/">Customer tracking</a>
+    </div>
+  </div>
+</main>
+
+<footer>FleetPulse Merchant Portal · no authentication — anyone can book as any merchant.</footer>
+
+<script type="module">
+import { consignment, health } from "./api.js";
+import { $, esc, show, toast, withBusy, wireHealthDots } from "./ui.js";
+
+const HUBS = ["HUB-BLR-01","HUB-CHN-02","HUB-HYD-01","HUB-DEL-03","HUB-MUM-01","HUB-KOL-02"];
+HUBS.forEach((h, i) => {
+  $("#origin-hub").add(new Option(h, h, i === 0, i === 0));
+  $("#dest-hub").add(new Option(h, h, i === 3, i === 3));
+});
+
+$("#pay").addEventListener("change", (e) => {
+  $("#cod-wrap").style.display = e.target.value === "COD" ? "" : "none";
+});
+
+$("#book-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = Object.fromEntries(new FormData(e.target).entries());
+  body.weight_grams = Number(body.weight_grams);
+  body.cod_amount = body.payment_mode === "COD" ? Number(body.cod_amount || 0) : 0;
+
+  if (body.origin_hub === body.destination_hub) {
+    return toast("Origin and destination must differ", "bad");
+  }
+
+  await withBusy(e.target.querySelector("button"), "Booking…", async () => {
+    try {
+      const r = await consignment.book(body);
+      $("#book-out").innerHTML = `
+        <div class="alert ok">
+          Booked <b class="mono">${esc(r.awb)}</b> —
+          <a href="${consignment.labelUrl(r.awb)}" target="_blank" rel="noopener">label ↗</a> ·
+          <a href="/track/?awb=${esc(r.awb)}" target="_blank" rel="noopener">track ↗</a>
+        </div>`;
+      show($("#book-out"), true);
+      toast(`Booked ${r.awb}`, "ok");
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  });
+});
+
+wireHealthDots(health);
+</script>
+</body>
+</html>

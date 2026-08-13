@@ -106,19 +106,73 @@ services:
     restart: unless-stopped
 
   # ==========================================================
-  # FRONTEND -- the single entry point: http://localhost
+  # WEB APPS
   #
-  # Serves the UI and proxies both APIs under one origin, so the browser
-  # makes same-origin requests and there is no CORS anywhere in the project.
+  # Four static apps behind one gateway. Every app image is built from the
+  # REPO ROOT (context: .) so it can copy packages/web-shared alongside its
+  # own files -- that is the shared API client and design system.
+  #
+  # Each app also publishes its own port for direct access while developing,
+  # but the gateway on :80 is the real entry point.
   # ==========================================================
-  frontend:
-    build: ./frontend
-    container_name: fp-frontend
+
+  gateway:
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
+    container_name: fp-gateway
     ports:
-      - "80:80"
+      - "80:80"                # <-- http://localhost
     depends_on:
       consignment-service: { condition: service_started }
       dispatch-service:    { condition: service_started }
+      merchant-portal:     { condition: service_started }
+      driver-app:          { condition: service_started }
+      hub-app:             { condition: service_started }
+      customer-portal:     { condition: service_started }
+      admin-console:       { condition: service_started }
+    restart: unless-stopped
+
+  # Operations console: network-wide view, and the only place a runsheet can
+  # be created without the simulator or a raw API call.
+  admin-console:
+    build:
+      context: .
+      dockerfile: apps/admin-console/Dockerfile
+    container_name: fp-admin
+    ports: ["3005:80"]
+    restart: unless-stopped
+
+  merchant-portal:
+    build:
+      context: .
+      dockerfile: apps/merchant-portal/Dockerfile
+    container_name: fp-merchant
+    ports: ["3001:80"]
+    restart: unless-stopped
+
+  driver-app:
+    build:
+      context: .
+      dockerfile: apps/driver-app/Dockerfile
+    container_name: fp-driver
+    ports: ["3002:80"]
+    restart: unless-stopped
+
+  hub-app:
+    build:
+      context: .
+      dockerfile: apps/hub-app/Dockerfile
+    container_name: fp-hub
+    ports: ["3003:80"]
+    restart: unless-stopped
+
+  customer-portal:
+    build:
+      context: .
+      dockerfile: apps/customer-portal/Dockerfile
+    container_name: fp-customer
+    ports: ["3004:80"]
     restart: unless-stopped
 
   # ==========================================================

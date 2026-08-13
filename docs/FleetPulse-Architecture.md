@@ -1,11 +1,10 @@
 # How FleetPulse Works
 
-The architecture and runtime behaviour of the two-service FleetPulse system, end to end.
+The architecture and runtime behaviour of the whole system: five front-end applications, one
+gateway, two backend microservices, PostgreSQL and Redis — ten containers, one command.
 
-This describes the design in [FleetPulse-Simple.md](FleetPulse-Simple.md) — the one you are
-actually building. Two optional add-ons are specified separately so the core stays small:
-[Observability](FleetPulse-Addon-Observability.md) and
-[Notification Service](FleetPulse-Addon-Notification.md).
+Companion documents: [FleetPulse-Apps.md](FleetPulse-Apps.md) (front-end structure and the full API
+surface) and [FleetPulse-Simple.md](FleetPulse-Simple.md) (the build plan).
 
 ---
 
@@ -14,69 +13,99 @@ actually building. Two optional add-ons are specified separately so the core sta
 FleetPulse models the operational spine of a parcel logistics network — the part of Delhivery that
 moves a package from a merchant's warehouse to a customer's door.
 
-A parcel's real-world journey looks like this:
-
 > A merchant books a shipment. FleetPulse issues an **AWB** (airway bill number) and a printable
-> label. The parcel is collected and scanned into the origin facility, travels between sorting hubs
-> on line-haul vehicles, and arrives at the facility nearest the customer. There it is assigned to a
-> driver's **runsheet** for the day. The driver's vehicle reports GPS positions while out. Finally
-> the parcel is either **delivered** (proof of delivery captured) or, after failed attempts, sent
-> **RTO** — return to origin.
+> label. The parcel is scanned into the origin facility, travels between sorting hubs on line-haul
+> vehicles, and arrives at the facility nearest the customer. There it is assigned to a driver's
+> **runsheet**. The driver's vehicle reports GPS while out. Finally the parcel is **delivered**
+> (proof captured) or, after failed attempts, sent **RTO** — return to origin.
 
-Every one of those steps is an API call in FleetPulse. The system's job is to know where every
-parcel is, who is responsible for it right now, and what happened to it.
+Five kinds of user touch a parcel, and each gets their own interface. The system's job is to know
+where every parcel is, who is responsible for it right now, and what happened to it.
 
 ---
 
-## 2. The pieces
+## 2. The whole system
 
 ```mermaid
 flowchart TB
-    CLIENT["Merchant / Customer / Driver app<br/><i>(simulated by simulate_delhivery_scans.py)</i>"]
-
-    subgraph HOST["One host — Docker Compose or Kubernetes"]
-        CS["<b>Consignment &amp; Hub Service</b><br/>:8000<br/>─────────────<br/>AWB booking<br/>Shipping labels<br/>Hub scans<br/>Status authority"]
-        DS["<b>Fleet &amp; Dispatch Service</b><br/>:8000<br/>─────────────<br/>Driver runsheets<br/>GPS ingest<br/>Delivery outcomes"]
-        RD[("<b>Redis</b><br/>tracking cache<br/>live GPS positions")]
+    subgraph USERS[" "]
+        M["🏪 Merchant"]
+        H["🏭 Hub operator"]
+        D["🚚 Driver"]
+        C["📦 Customer"]
+        O["🎛️ Operations"]
     end
 
-    PG[("<b>PostgreSQL</b><br/>schema: consignment<br/>schema: dispatch")]
+    GW["<b>gateway</b> :80<br/>nginx — one origin<br/>host + path routing · API proxy"]
 
-    CLIENT -->|"REST"| CS
-    CLIENT -->|"REST"| DS
-    DS -->|"<b>REST — the only<br/>inter-service call</b>"| CS
-    CS <--> RD
-    DS <--> RD
-    CS <--> PG
-    DS <--> PG
+    M --> GW
+    H --> GW
+    D --> GW
+    C --> GW
+    O --> GW
+
+    subgraph APPS["Static apps (nginx, no build step)"]
+        MP["merchant-portal<br/>/merchant/ · :3001"]
+        HA["hub-app<br/>/hub/ · :3003"]
+        DA["driver-app<br/>/driver/ · :3002"]
+        CP["customer-portal<br/>/track/ · :3004"]
+        AC["admin-console<br/>/admin/ · :3005"]
+    end
+
+    GW --> MP & HA & DA & CP & AC
+
+    subgraph SVC["Backend microservices (FastAPI)"]
+        CS["<b>consignment-service</b> :8000<br/>parcels · scans · labels<br/><b>THE STATE MACHINE</b>"]
+        DS["<b>dispatch-service</b> :8000<br/>runsheets · GPS · POD"]
+    end
+
+    GW -->|"/api/consignment/*"| CS
+    GW -->|"/api/dispatch/*"| DS
+    DS -->|"REST — the only<br/>inter-service call"| CS
+
+    PG[("PostgreSQL<br/>schemas: consignment, dispatch")]
+    RD[("Redis<br/>tracking cache + live GPS")]
+
+    CS --> PG & RD
+    DS --> PG & RD
 ```
 
-| Component | Responsibility | Why it exists separately |
+Ten containers. Every app is reachable three ways — its own hostname
+(`driver.fleetpulse.localhost`), a path under localhost (`/driver/`), or its direct port (`:3002`) —
+and all three are always live. See [FleetPulse-Apps.md §1](FleetPulse-Apps.md).
+
+### 2.1 Component responsibilities
+
+| Component | Owns | Notes |
 |---|---|---|
-| **Consignment & Hub Service** | Owns the parcel record and its status. Books AWBs, generates labels, records facility scans. | This is the *system of record*. Every status change in the business must go through it. |
-| **Fleet & Dispatch Service** | Owns drivers, vehicles, runsheets, and delivery attempts. | Different data, different change rate, different failure tolerance. Last-mile churns constantly; parcel records do not. |
-| **PostgreSQL** | Durable truth. Two schemas, one database. | Anything you would be upset to lose. |
-| **Redis** | Tracking cache + last-known vehicle position. | Two workloads that would otherwise abuse Postgres. |
+| **gateway** | Nothing | nginx. Launcher + host/path routing + API proxy |
+| **merchant-portal** | Nothing | Booking. Bulk upload and labels not built |
+| **hub-app** | Nothing | High-speed inbound/outbound scanning |
+| **driver-app** | Nothing | Runsheets, out-for-delivery scan, POD, GPS |
+| **customer-portal** | Nothing | Public tracking; the AWB is the only credential |
+| **admin-console** | Nothing | Network-wide ops. **The only place a runsheet can be created** |
+| **consignment-service** | Waybills, scan events, parcel status | **System of record.** Owns `ALLOWED_TRANSITIONS` |
+| **dispatch-service** | Runsheets, stops, delivery attempts, POD | Drives the last three transitions, performs none of them |
+| **PostgreSQL** | Durable truth | One database, two schemas |
+| **Redis** | Tracking cache + last-known GPS | Two roles with opposite failure semantics (§6.2) |
 
-### 2.1 The one rule that makes this "microservices"
+All five app containers hold **no state and no database access**. They are static HTML, CSS and ES
+modules served by nginx, calling HTTP APIs through the gateway. That is why adding a sixth app, or
+rewriting one in React, changes nothing behind the gateway.
 
-**Dispatch never touches Consignment's tables.** It asks over HTTP.
+### 2.2 Three rules that define the design
 
-That single constraint is what separates a microservices system from one application with two
-folders. Dispatch could trivially run `UPDATE consignment.waybills SET current_status = ...` — the
-database connection is right there, same instance, same credentials. It must not.
+**1. Dispatch never writes to the `consignment` schema.** Same database, same credentials, trivially
+possible — and forbidden. Consignment enforces legal state transitions; if dispatch wrote directly,
+that rule would live in two places and eventually disagree. All cross-service traffic goes through
+`services/dispatch-service/app/consignment_client.py`.
 
-Why it matters: Consignment enforces the legal state transitions (§4.2). If Dispatch wrote directly
-to the table, that rule would live in two places and eventually disagree. The HTTP boundary makes
-the rule enforceable in exactly one place.
+**2. Dependencies point one way.** Dispatch → consignment, never the reverse. Circular service
+dependencies create startup-ordering problems and cascading timeouts.
 
-### 2.2 Dependency direction
-
-The arrow points one way: **Dispatch → Consignment.** Consignment never calls Dispatch.
-
-This is deliberate. Circular dependencies between services create startup ordering problems, cascading
-timeouts, and deadlocks that are painful to debug. When you add a third service
-([notifications](FleetPulse-Addon-Notification.md)), keep the graph acyclic.
+**3. Front-ends never talk to a database.** They call HTTP APIs through the gateway. Obvious, but it
+is why swapping any app for React, or adding a sixth, changes nothing behind the gateway. The admin
+console proved this: it was built entirely from endpoints that already existed.
 
 ---
 
@@ -84,14 +113,16 @@ timeouts, and deadlocks that are painful to debug. When you add a third service
 
 ```mermaid
 erDiagram
-    WAYBILLS ||--o{ SCAN_EVENTS : "has history"
-    RUNSHEETS ||--o{ DELIVERY_ATTEMPTS : "contains"
-    WAYBILLS ||..o{ DELIVERY_ATTEMPTS : "referenced by AWB (no FK)"
+    WAYBILLS ||--o{ SCAN_EVENTS : "append-only history"
+    RUNSHEETS ||--o{ RUNSHEET_ITEMS : "stops"
+    RUNSHEETS ||--o{ DELIVERY_ATTEMPTS : "outcomes"
+    WAYBILLS ||..o{ RUNSHEET_ITEMS : "by AWB (no FK)"
 
     WAYBILLS {
         varchar awb PK
         varchar merchant_name
         varchar consignee_name
+        varchar consignee_phone
         varchar consignee_addr
         varchar origin_hub
         varchar destination_hub
@@ -112,269 +143,263 @@ erDiagram
         varchar vehicle_id
         varchar hub_id
     }
+    RUNSHEET_ITEMS {
+        varchar runsheet_id PK
+        varchar awb PK
+        integer sequence
+        varchar status
+    }
     DELIVERY_ATTEMPTS {
         bigserial id PK
         varchar awb
         varchar runsheet_id FK
         varchar outcome
-        text reason
+        varchar pod_type
+        varchar pod_receiver
+        text pod_data
     }
 ```
 
-Three design choices worth understanding:
+Four choices worth understanding:
 
-**`scan_events` is append-only.** You never `UPDATE` it. `waybills.current_status` is a
-denormalised convenience column — fast to read — but `scan_events` is the truth, and you could
-rebuild `current_status` from it at any time. This is why tracking history is trustworthy.
+**`scan_events` is append-only.** Never updated or deleted. `waybills.current_status` is a
+denormalised convenience column that could be rebuilt from it at any time. This is why the tracking
+history a customer sees is trustworthy.
 
-**`delivery_attempts.awb` has no foreign key.** It points at a table in the *other* service's schema.
-A real FK would create a hard database-level coupling that makes splitting the services later
-impossible. The reference is by value, validated over HTTP at write time.
+**`runsheet_items` exists because the driver app needed it.** Before it, `runsheets` recorded *who*
+was driving and `delivery_attempts` recorded what had *already* been attempted — nothing recorded
+what was **on** the runsheet. "What am I delivering today?" was unanswerable.
 
-**There is no `gps_pings` table.** Deliberately. See §4.5.
+**No FK crosses a schema boundary.** `runsheet_items.awb` and `delivery_attempts.awb` point at
+`consignment.waybills` by value. A real FK would couple the schemas at the database level and make a
+future service split impossible. AWBs are validated over HTTP instead.
+
+**There is no `gps_pings` table.** Deliberately — see §4.7.
 
 ---
 
 ## 4. Request flows
 
-### 4.1 Booking a parcel
+### 4.1 Every request starts at the gateway
 
 ```mermaid
 sequenceDiagram
-    participant M as Merchant
-    participant C as Consignment
-    participant P as Postgres
+    participant B as Browser
+    participant G as gateway (nginx)
+    participant A as app container
+    participant S as service
 
-    M->>C: POST /api/v1/waybills<br/>{merchant, consignee, hubs, weight, COD}
-    Note over C: Pydantic validates the body.<br/>Bad input → 422 before any code runs.
-    C->>C: generate_awb() → "FP4820193756"
-    C->>P: INSERT waybills (status = MANIFESTED)
-    C->>P: INSERT scan_events ("Shipment booked")
-    Note over C,P: Both in ONE transaction — a parcel<br/>always has at least one history row.
-    P-->>C: committed
-    C-->>M: 201 {awb, status, tracking_url}
+    alt By path (works with no setup)
+        B->>G: GET /driver/ <br/>Host: localhost
+        Note over G: default server, /driver/ location
+    else By hostname (name must resolve first)
+        B->>G: GET / <br/>Host: driver.fleetpulse.localhost
+        Note over G: matches the driver vhost server block
+    end
+
+    G->>A: GET /            (prefix stripped either way)
+    A-->>B: index.html
+    B->>G: GET ./app.js
+    Note over B,A: Apps use RELATIVE asset paths, so the same file<br/>works behind /driver/, on the hostname, and on :3002.
+
+    B->>G: GET /api/dispatch/v1/runsheets?driver_id=DRV-4417
+    G->>S: GET /api/v1/runsheets?driver_id=DRV-4417
+    S-->>B: 200 JSON
 ```
 
-The two inserts share a transaction. If the second failed independently you would have parcels with
-no history, and the audit trail would silently have holes.
+Every `server` block in the gateway includes the same `api_locations.conf`, so `/api/*` resolves
+same-origin **from whichever hostname you used**. That is what keeps **CORS out of this project
+entirely** — the most common source of frontend/backend friction, designed out rather than
+configured around.
 
-### 4.2 Recording a hub scan — where the rules live
+Absolute asset paths would break this: `/app.js` requested from `localhost/driver/` escapes the
+prefix and 404s. Every app therefore uses `./app.js` and `./base.css`.
+
+### 4.2 Booking — Merchant Portal
 
 ```mermaid
 sequenceDiagram
-    participant H as Hub scanner
-    participant C as Consignment
+    participant M as Merchant Portal
+    participant C as consignment
+    participant P as Postgres
+
+    M->>C: POST /waybills {merchant, consignee, hubs, weight, COD}
+    Note over C: Pydantic validates. Bad input → 422<br/>before any handler code runs.
+    C->>C: generate_awb() → "FP4820193756"
+    rect rgb(232, 240, 254)
+        Note over C,P: ONE transaction
+        C->>P: INSERT waybills (status = MANIFESTED)
+        C->>P: INSERT scan_events ("Shipment booked")
+    end
+    C-->>M: 201 {awb, tracking_url, label_url}
+```
+
+Both inserts share a transaction, so a parcel can never exist without at least one history row.
+
+### 4.3 Hub scan — where the rules live
+
+```mermaid
+sequenceDiagram
+    participant H as Hub Scanner
+    participant C as consignment
     participant P as Postgres
     participant R as Redis
 
-    H->>C: POST /api/v1/scans<br/>{awb, status: ARRIVED_AT_FACILITY, hub_id}
-    C->>P: SELECT current_status WHERE awb = ?
+    H->>C: POST /scans {awb, ARRIVED_AT_FACILITY, hub_id}
+    C->>P: SELECT current_status ... FOR UPDATE
     P-->>C: "IN_TRANSIT"
 
     alt Illegal transition
-        Note over C: ALLOWED_TRANSITIONS["IN_TRANSIT"]<br/>= {ARRIVED_AT_FACILITY}
-        C-->>H: 409 Conflict "Cannot move from X to Y"
-    else Legal transition
+        C-->>H: 409 "Cannot move from X to Y"
+    else Legal
         C->>P: UPDATE waybills SET current_status
         C->>P: INSERT scan_events
         C->>R: DEL awb:FP4820193756
-        Note over R: Invalidate, don't update.<br/>Next read re-fetches from Postgres.
         C-->>H: 201 {previous_status, new_status}
     end
 ```
 
-The state machine is a plain Python dict:
+`SELECT ... FOR UPDATE` holds the row for the transaction, so two concurrent scans of the same
+parcel cannot both read the old status and both conclude their move is legal.
 
-```python
-ALLOWED_TRANSITIONS = {
-    "MANIFESTED":          {"IN_TRANSIT"},
-    "IN_TRANSIT":          {"ARRIVED_AT_FACILITY"},
-    "ARRIVED_AT_FACILITY": {"IN_TRANSIT", "OUT_FOR_DELIVERY"},
-    "OUT_FOR_DELIVERY":    {"DELIVERED", "RTO"},
-    "DELIVERED":           set(),   # terminal
-    "RTO":                 set(),   # terminal
-}
-```
+**Cache invalidation is `DEL`, never overwrite.** If you wrote the new value and the transaction
+later rolled back, the cache would hold data that was never committed. Deleting is always safe.
 
-A parcel cannot jump from `MANIFESTED` straight to `DELIVERED`. Attempting it returns 409 rather
-than silently corrupting the record. This catches real bugs — a retried request, an out-of-order
-scan, a driver app double-submitting.
-
-**On cache invalidation:** notice the code deletes the key rather than writing the new value. Both
-work, but delete-on-write is harder to get wrong. If you update the cache and the transaction later
-rolls back, the cache now holds data that was never committed. Deleting is always safe.
-
-### 4.3 Tracking lookup — the hot path
+### 4.4 Tracking — Customer Portal
 
 ```mermaid
 sequenceDiagram
-    participant U as Customer
-    participant C as Consignment
+    participant U as Customer Portal
+    participant C as consignment
     participant R as Redis
     participant P as Postgres
 
-    U->>C: GET /api/v1/waybills/FP4820193756
-
+    U->>C: GET /waybills/FP4820193756
     alt Cache HIT (typical)
-        C->>R: GET awb:FP4820193756
+        C->>R: GET awb:...
         R-->>C: {...}
-        C-->>U: 200 {..., "_cache": "HIT"}
-        Note over C,R: ~2 ms. Postgres never touched.
+        C-->>U: 200 {..., "_cache": "HIT"}     ~2 ms
     else Cache MISS
-        C->>R: GET awb:FP4820193756
-        R-->>C: (nil)
-        C->>P: SELECT * FROM waybills WHERE awb = ?
-        P-->>C: row
-        C->>R: SETEX awb:... 300 {...}
-        C-->>U: 200 {..., "_cache": "MISS"}
-        Note over C,P: ~20 ms
+        C->>R: (nil)
+        C->>P: SELECT * FROM waybills
+        C->>R: SETEX awb:... 300
+        C-->>U: 200 {..., "_cache": "MISS"}    ~20 ms
     end
 ```
 
-This is the most-called endpoint in any logistics system — customers refresh tracking pages
-obsessively. Caching it with a 5-minute TTL is the single highest-leverage performance decision in
-the app.
+The most-called endpoint in any logistics system — customers refresh tracking pages obsessively.
+The portal fetches the parcel and its history in parallel.
 
-**Redis failing must not break tracking.** Every cache helper swallows its exception and returns
-`None`:
+### 4.5 Runsheet creation — Admin Console
 
-```python
-def cache_get(key: str) -> dict | None:
-    try:
-        raw = _r.get(key)
-        return json.loads(raw) if raw else None
-    except Exception as e:
-        log.warning("cache read failed (continuing without cache): %s", e)
-        return None   # ← behaves exactly like a cache miss
-```
-
-A Redis outage degrades the system to "slower." A cache that can take down your application is
-worse than having no cache.
-
-### 4.4 Creating a runsheet — the cross-service call
-
-This is the most important flow to understand. It is the only place two services talk.
+The hand-off from the middle mile to the last mile, and the only write in the system that touches
+both services' data in one user action.
 
 ```mermaid
 sequenceDiagram
-    participant O as Hub operator
-    participant D as Dispatch
-    participant C as Consignment
-    participant PD as Postgres (dispatch)
+    participant A as Admin Console
+    participant CS as consignment
+    participant DS as dispatch
+    participant PD as Postgres
 
-    O->>D: POST /api/v1/runsheets<br/>{driver, vehicle, hub, awbs: [5 AWBs]}
+    Note over A,CS: Populate the picker
+    A->>CS: GET /waybills?status=ARRIVED_AT_FACILITY
+    CS-->>A: parcels (filtered client-side by destination hub)
+    Note over A: Only this status can legally go OUT_FOR_DELIVERY,<br/>so the UI cannot build a request the state machine rejects.
 
-    Note over D,C: STEP 1 — validate everything FIRST
-    loop for each AWB
-        D->>C: GET /api/v1/waybills/{awb}
-        alt not found
-            C-->>D: 404
-            D-->>O: 400 "AWB ... does not exist"
-            Note over D: Reject the WHOLE request.<br/>Nothing written yet.
-        else exists
-            C-->>D: 200 {...}
-        end
+    Note over A,DS: Create
+    A->>DS: POST /runsheets {driver, vehicle, hub, awbs[]}
+
+    loop STEP 1 — validate every AWB first
+        DS->>CS: GET /waybills/{awb}
+    end
+    Note over DS: One bad AWB rejects the WHOLE request.<br/>Nothing written yet.
+
+    DS->>PD: INSERT runsheets
+    DS->>PD: INSERT runsheet_items (sequence 1..N, PENDING)
+
+    loop STEP 3 — move each parcel
+        DS->>CS: PATCH /waybills/{awb}/status {OUT_FOR_DELIVERY}
     end
 
-    Note over D,PD: STEP 2 — write locally
-    D->>PD: INSERT runsheets
-
-    Note over D,C: STEP 3 — tell Consignment each parcel moved
-    loop for each AWB
-        D->>C: PATCH /waybills/{awb}/status<br/>{status: OUT_FOR_DELIVERY}
-        alt success
-            C-->>D: 200
-        else failure
-            C-->>D: 409 / timeout
-            Note over D: Record in `failed[]`, keep going.
-        end
-    end
-
-    D-->>O: 201 {runsheet_id, assigned: [...], failed: [...]}
+    DS-->>A: 201 {assigned[], failed[]}
 ```
 
-**Validate-then-write is the pattern.** Step 1 checks every AWB before step 2 writes anything, so a
-single bad AWB rejects the whole request rather than half-creating a runsheet.
+**Validate-then-write** means a single bad AWB rejects the request rather than half-creating a
+runsheet. Step 3 can still partially fail — no transaction spans two services over HTTP — so the
+response carries both lists and the console renders the failures inline rather than hiding them.
 
-**Step 3 can partially fail, and the response says so honestly.** Without a message broker there is
-no way to make "create runsheet" and "update 5 parcels" atomic. So the API returns both lists:
+`runsheet_items` is what makes the driver app possible; before it existed, "what am I delivering
+today?" had no answer (§3).
 
-```json
-{
-  "runsheet_id": "RS-20260813-01-417",
-  "assigned": ["FP4820193756", "FP1029384756", "FP5647382910"],
-  "failed": [
-    { "awb": "FP9988776655", "error": "Illegal status change: already DELIVERED" }
-  ]
-}
-```
-
-This is the real trade-off of synchronous REST, and naming it plainly is better than hiding it.
-[The notification add-on](FleetPulse-Addon-Notification.md) introduces the outbox pattern, which is
-how you fix this class of problem without adopting a broker.
-
-### 4.5 GPS pings — the path that avoids the database
+### 4.6 Driver workflow — the cross-service call
 
 ```mermaid
 sequenceDiagram
-    participant V as Vehicle
-    participant D as Dispatch
+    participant D as Driver App
+    participant DS as dispatch
+    participant CS as consignment
+    participant PD as Postgres
+
+    Note over D,CS: Open a runsheet
+    D->>DS: GET /runsheets/{id}
+    DS->>PD: SELECT runsheet_items ORDER BY sequence
+    loop per stop
+        DS->>CS: GET /waybills/{awb}
+        Note over DS,CS: Enrich with consignee name, address, phone, COD.<br/>Dispatch does not own that data, so it asks.
+        CS-->>DS: 200 (or error → stop still renders with AWB)
+    end
+    DS-->>D: 200 {stops: [...]}
+
+    Note over D,CS: Scan out for delivery
+    D->>CS: PATCH /waybills/{awb}/status {OUT_FOR_DELIVERY}
+    CS-->>D: 200
+
+    Note over D,CS: Capture proof of delivery
+    D->>DS: POST /delivery {outcome, pod_type, pod_data, pod_receiver}
+    DS->>PD: INSERT delivery_attempts (with POD)
+    DS->>PD: UPDATE runsheet_items SET status
+    DS->>CS: PATCH /waybills/{awb}/status {DELIVERED}
+    alt consignment reachable
+        CS-->>DS: 200
+        DS-->>D: 201
+    else consignment down
+        DS-->>D: 207 Multi-Status
+        Note over D: The driver's work IS saved.<br/>App shows "will reconcile shortly", not an error.
+    end
+```
+
+**The enrichment loop is N+1 by design.** Runsheets cap at 50 stops, and the alternative — dispatch
+reading `consignment.waybills` directly — breaks rule 1 in §2.2. If it ever became hot, the fix is a
+batch endpoint on consignment, not a cross-schema `SELECT`.
+
+**The 207 is deliberate.** A `500` would imply nothing happened; a `201` would claim everything
+worked. Neither is true. This is the real cost of synchronous REST without a broker, and the
+transactional outbox in [the notification add-on](FleetPulse-Addon-Notification.md) is how you close
+it.
+
+### 4.7 GPS — the path that avoids the database
+
+```mermaid
+sequenceDiagram
+    participant D as Driver App
+    participant DS as dispatch
     participant R as Redis
     participant P as Postgres
 
-    loop every ~10 seconds per vehicle
-        V->>D: POST /api/v1/gps {vehicle_id, lat, lon, speed}
-        D->>R: SETEX vehicle:KA01AB1234:location 3600 {...}
-        D-->>V: 202 Accepted
+    loop every 15 s while a runsheet is open
+        D->>DS: POST /gps {vehicle_id, lat, lon, speed}
+        DS->>R: SETEX vehicle:{id}:location 3600
+        DS-->>D: 202 Accepted
     end
-
     Note over P: Postgres is never written to.
-
-    participant U as Customer
-    U->>D: GET /api/v1/vehicles/KA01AB1234/location
-    D->>R: GET vehicle:KA01AB1234:location
-    R-->>D: {lat, lon, speed, recorded_at}
-    D-->>U: 200
 ```
 
-**Why GPS never reaches Postgres.** Do the arithmetic: 100 vehicles pinging every 10 seconds is
-864,000 writes per day. A `db.t3.micro` would spend its entire IO budget on data whose value expires
-in ten seconds — only the newest ping matters. Redis holds one key per vehicle with a 1-hour TTL, so
-a vehicle that stops reporting disappears on its own with no cleanup job.
+100 vehicles pinging every 10 seconds is ~864,000 writes/day of data whose value expires in seconds.
+Redis holds one key per vehicle with a 1-hour TTL, so a vehicle that stops reporting expires on its
+own with no cleanup job.
 
-**Note the `202 Accepted`, not `201 Created`.** The API is telling the truth: this was accepted, and
-it is not durable. If Redis restarts, positions are lost and rebuild within ten seconds.
-
-This "high-write, low-durability data does not belong in your relational database" reasoning is a
-genuine architectural decision, and a good one to be able to defend.
-
-### 4.6 Delivery — closing the loop
-
-```mermaid
-sequenceDiagram
-    participant DR as Driver
-    participant D as Dispatch
-    participant PD as Postgres (dispatch)
-    participant C as Consignment
-
-    DR->>D: POST /api/v1/delivery<br/>{awb, runsheet_id, outcome: DELIVERED}
-    D->>PD: INSERT delivery_attempts
-    Note over PD: Recorded locally first — the attempt<br/>happened, regardless of what follows.
-    D->>C: PATCH /waybills/{awb}/status {DELIVERED}
-
-    alt Consignment reachable
-        C-->>D: 200
-        D-->>DR: 201 {awb, outcome}
-    else Consignment down
-        C-->>D: connection error
-        D-->>DR: 207 Multi-Status<br/>"Attempt saved, status update failed"
-        Note over D,DR: 207 is honest: partially done.<br/>Needs manual reconciliation.
-    end
-```
-
-The `207` response is deliberate. A `500` would suggest nothing happened; a `201` would claim
-everything worked. Neither is true. This is exactly the gap an outbox table closes — see the
-[notification add-on](FleetPulse-Addon-Notification.md).
+**`202 Accepted`, not `201 Created`** — the API is being honest that the write is non-durable.
 
 ---
 
@@ -382,126 +407,155 @@ everything worked. Neither is true. This is exactly the gap an outbox table clos
 
 ```mermaid
 stateDiagram-v2
-    [*] --> MANIFESTED: POST /waybills
-    MANIFESTED --> IN_TRANSIT: POST /scans
-    IN_TRANSIT --> ARRIVED_AT_FACILITY: POST /scans
-    ARRIVED_AT_FACILITY --> IN_TRANSIT: POST /scans (onward hub)
-    ARRIVED_AT_FACILITY --> OUT_FOR_DELIVERY: POST /runsheets
-    OUT_FOR_DELIVERY --> DELIVERED: POST /delivery
-    OUT_FOR_DELIVERY --> RTO: POST /delivery
+    [*] --> MANIFESTED: Merchant Portal
+    MANIFESTED --> IN_TRANSIT: Hub Scanner (outbound)
+    IN_TRANSIT --> ARRIVED_AT_FACILITY: Hub Scanner (inbound)
+    ARRIVED_AT_FACILITY --> IN_TRANSIT: Hub Scanner (onward hub)
+    ARRIVED_AT_FACILITY --> OUT_FOR_DELIVERY: Admin Console / Driver App
+    OUT_FOR_DELIVERY --> DELIVERED: Driver App (POD)
+    OUT_FOR_DELIVERY --> RTO: Driver App (NDR)
     DELIVERED --> [*]
     RTO --> [*]
-
-    note right of ARRIVED_AT_FACILITY
-        Self-loop: a Bengaluru → Guwahati
-        parcel passes through 3–4 hubs.
-        Only Consignment can authorise
-        these transitions.
-    end note
 ```
 
-Which service triggers each transition:
-
-| Transition | Triggered by | Endpoint |
+| Transition | Triggered from | Endpoint |
 |---|---|---|
-| → `MANIFESTED` | Consignment | `POST /waybills` |
-| → `IN_TRANSIT` | Consignment | `POST /scans` |
-| → `ARRIVED_AT_FACILITY` | Consignment | `POST /scans` |
-| → `OUT_FOR_DELIVERY` | **Dispatch**, via HTTP | `PATCH /waybills/{awb}/status` |
-| → `DELIVERED` / `RTO` | **Dispatch**, via HTTP | `PATCH /waybills/{awb}/status` |
+| → `MANIFESTED` | Merchant Portal | `POST /waybills` |
+| → `IN_TRANSIT` | Hub Scanner | `POST /scans` |
+| → `ARRIVED_AT_FACILITY` | Hub Scanner | `POST /scans` |
+| → `OUT_FOR_DELIVERY` | **Admin Console** (bulk, on runsheet creation) or **Driver App** (per stop) | `POST /runsheets` or `PATCH /waybills/{awb}/status` |
+| → `DELIVERED` / `RTO` | Driver App | `POST /delivery` → `PATCH …/status` |
 
-Dispatch drives the last three transitions but does not *perform* them — it asks Consignment to.
+Two apps can drive `OUT_FOR_DELIVERY`, and both go through the same `PATCH` on consignment —
+the admin console indirectly, via `POST /runsheets`. Neither writes parcel status itself.
+
+Every arrow is validated against `ALLOWED_TRANSITIONS` in consignment. The driver app additionally
+*hides* illegal actions — "Complete delivery" is disabled until the parcel is `OUT_FOR_DELIVERY` —
+but the backend enforces it regardless. UI restrictions are a courtesy; the 409 is the guarantee.
 
 ---
 
 ## 6. When things break
 
-Honest failure analysis, because this is what interviews probe and what production actually does.
+### 6.1 Failure matrix
 
-| Failure | Effect | Why it behaves that way |
+| Failure | Effect | Why |
 |---|---|---|
-| **Redis down** | Tracking still works, just slower. GPS endpoints 500. | Cache helpers fail soft; GPS has no fallback store by design. |
-| **Consignment down** | Booking, tracking, scans all fail. Dispatch can still record GPS and delivery attempts locally, but returns 207. | Consignment is the system of record — nothing routes around it. |
-| **Dispatch down** | Booking, tracking, and hub scans unaffected. | Nothing depends on Dispatch. This is why the dependency arrow points one way. |
-| **Postgres down** | Everything fails except cached tracking reads and GPS. | Correct: better to reject writes than accept ones you cannot persist. |
-| **Consignment slow (not down)** | Runsheet creation slows or times out at 5s. | `httpx.Timeout(5.0, connect=2.0)` bounds it. Without a timeout, one slow call would hang a worker indefinitely. |
-| **Partial runsheet failure** | Some parcels assigned, some not. Reported in `failed[]`. | No transaction spans two services over HTTP. |
+| **An app container down** | That app 502s through the gateway. The other four unaffected | Five independent static containers |
+| **Gateway down** | All hostnames and paths dead; **direct ports 3001–3005 still work** | Single entry point is a single point of failure — the direct ports are the escape hatch |
+| **Redis down** | Tracking works, slower. GPS endpoints 503 | Two roles, two policies — §6.2 |
+| **consignment down** | Booking, tracking, scans fail. Admin console's parcel list and picker fail. Driver can still record POD → 207 | It is the system of record |
+| **dispatch down** | Merchant, hub and customer apps unaffected. Driver app and admin runsheet tab dead | Nothing depends on dispatch |
+| **Postgres down** | All writes fail; cached tracking reads still succeed | Correct: reject rather than accept unpersistable writes |
+| **consignment slow** | Runsheet detail slows, bounded at 5 s per call | `httpx.Timeout(5.0, connect=2.0)` |
+| **Partial runsheet assign** | Some parcels assigned; `failed[]` lists the rest, rendered inline by the console | No transaction spans two services |
 
-**The single-point-of-failure is Consignment**, and that is a real property of this design, not an
-oversight. It is the system of record; making it optional would mean giving up the guarantee that
-parcel status has one authority.
+**consignment-service is the single point of failure**, and that is a property of the design, not an
+oversight. Making the system of record optional would mean giving up the guarantee that parcel
+status has exactly one authority.
+
+### 6.2 The two Redis roles
+
+| | consignment `cache.py` | dispatch `cache.py` |
+|---|---|---|
+| Role | **Cache** — Postgres is the truth | **Store** — nothing else holds GPS |
+| On failure | Logs, returns `None`, behaves as a miss | Propagates; endpoints return **503** |
+| Rationale | A cache that can down the service is worse than no cache | Silently discarding writes is worse than an error |
+
+Do not harmonise these. Knowing which kind of Redis you have is the whole distinction.
+
+```bash
+docker compose stop redis
+curl -s localhost/api/consignment/v1/waybills/$AWB        # 200 — still works
+curl -s -o /dev/null -w '%{http_code}\n' \
+     localhost/api/dispatch/v1/vehicles/KA01AB1234/location   # 503 — honest
+docker compose start redis
+```
 
 ---
 
-## 7. The same app in four environments
+## 7. Cross-cutting concerns
 
-The application code never changes. Only configuration does.
+**Service discovery.** `http://consignment-service:8000` is the same URL in Docker Compose and in
+Kubernetes — both provide DNS by service name. That is why no application code changes when moving
+to a cluster.
 
-```mermaid
-flowchart LR
-    subgraph L["1. Laptop — Docker Compose"]
-        L1["2 services + Postgres + Redis<br/>all containers · hot reload"]
-    end
-    subgraph M["2. Laptop — minikube"]
-        M1["Same images on Kubernetes<br/>Deployments · Ingress · HPA"]
-    end
-    subgraph E["3. AWS EC2 — Docker Compose"]
-        E1["Images from ECR<br/>Postgres → RDS"]
-    end
-    subgraph K["4. AWS EKS"]
-        K1["Same manifests + ALB<br/>IRSA · managed nodes"]
-    end
-    L --> M --> E --> K
-```
+**Configuration.** `.env.example` is the contract; `docker-compose.yml` carries defaults so the
+stack starts without a `.env`. Missing config fails loudly with a message naming the variable, not
+a bare `KeyError`.
 
-| | Local Compose | minikube | EC2 Compose | EKS |
+**No authentication.** The driver "login" is a picker in `localStorage`; anyone can be any driver,
+hub, or merchant. The customer portal is genuinely public — the AWB *is* the credential, matching
+every real courier. See [FleetPulse-Apps.md §5](FleetPulse-Apps.md) for what real auth would take;
+the short version is **backend first**, because auth added only in the frontend is decoration when
+anyone can `curl` the API.
+
+> ⚠️ The **admin console raises the stakes here.** It can create runsheets and read every parcel in
+> the network. It must not be reachable beyond localhost until real auth exists — and when it is
+> added, this is the app that needs a role check, not just a login.
+
+**No build step.** Apps are HTML + CSS + ES modules served by nginx. `packages/web-shared` is copied
+into each image at build time, so no app depends on another being up. The cost is that changing the
+shared package requires rebuilding all six images.
+
+**Container healthchecks bind IPv4.** In `nginx:alpine`, `localhost` resolves to `::1` first while
+`listen 80` binds IPv4 only — so `wget http://localhost/healthz` returns *connection refused* from a
+container that is serving perfectly. All six app images use `127.0.0.1` for this reason. A
+healthcheck that always fails is worse than none: it makes `docker compose ps` lie.
+
+---
+
+## 8. Deployment topology
+
+The application code never changes between environments — only configuration.
+
+| | Local Compose | minikube | AWS EC2 | EKS |
 |---|---|---|---|---|
 | Postgres | container | container | **RDS** | RDS or in-cluster |
 | Redis | container | pod | container | pod |
-| Images | built locally | built into minikube | **ECR** | ECR |
-| Ingress | published ports | NGINX Ingress | published ports | **ALB** |
+| Images | built locally | loaded into minikube | **ECR** | ECR |
+| Routing | gateway nginx | **Ingress** | gateway nginx | **ALB Ingress** |
+| App hostnames | hosts file | `/etc/hosts` + `minikube ip` | hosts file or DNS | **Route 53** |
 | Service discovery | Compose DNS | K8s DNS | Compose DNS | K8s DNS |
 | Config | `.env` | ConfigMap + Secret | `.env` | ConfigMap + Secret |
-| Cost | $0 | $0 | $0 free tier | ~$5/mo burst |
 
-Notice service discovery: `http://consignment-service:8000` is the same URL in all four. Docker
-Compose and Kubernetes both provide DNS by service name. That is not a coincidence — it is why the
-code needs no environment branching.
+The gateway is deliberately Ingress-shaped — **host- and path-based routing to several backends from
+one entry point** — which is exactly the Ingress resource model. Each `server { server_name … }`
+block becomes an Ingress `rule.host`; each `location /x/` becomes a `path`. Moving to Kubernetes is
+a translation of `apps/gateway/nginx.conf`, not a redesign. See
+[FleetPulse-Kubernetes.md](FleetPulse-Kubernetes.md).
 
 ---
 
-## 8. Deliberate omissions
+## 9. Deliberate omissions
 
-Things a production system would have that this one does not, and why that is the right call here.
-
-| Missing | Why it is fine | When to add it |
+| Missing | Why it is fine here | When to add it |
 |---|---|---|
-| Authentication | No real user data; SGs restrict access to your IP | Before anything is genuinely public |
+| Authentication | No real data; nothing is publicly exposed | Before anything is reachable from the internet |
 | Message broker | Two services, one call between them | When a third consumer needs the same events |
-| Database per service | Two services do not justify it — separate *schemas* mark the boundary | When teams own services independently |
+| Database per service | Separate *schemas* already mark the boundary | When teams own services independently |
 | Retries / circuit breakers | Failures are visible and reported honestly | When cross-service calls become frequent |
-| Distributed tracing | Two services, one hop — logs are enough | [Observability add-on](FleetPulse-Addon-Observability.md) |
-| Horizontal scaling | Single instance handles simulator load easily | Kubernetes HPA exercise |
+| Distributed tracing | Two services, one hop — logs suffice | [Observability add-on](FleetPulse-Addon-Observability.md) |
+| Bulk operations | Single booking proves the model | Merchant portal's next milestone |
 | Rate limiting | No public exposure | Before public exposure |
 
-Being able to say *"I left that out on purpose, and here is when I would add it"* is far stronger
-than having built everything.
+Being able to say *"I left that out on purpose, and here is when I would add it"* is stronger than
+having built everything.
 
 ---
 
-## 9. Extending it
+## 10. Extending it
 
-Two add-ons, written to be applied **after** the core works. Each is self-contained and neither
-requires changes to the other.
+**[→ FleetPulse-Apps.md](FleetPulse-Apps.md)** — front-end structure, the complete API surface
+(built and specified), and the authentication design.
 
-### [→ Observability Add-On](FleetPulse-Addon-Observability.md)
-Structured logging, a `/metrics` endpoint with domain-specific metrics, Prometheus + Grafana,
-dashboards, alerts, and optional OpenTelemetry tracing. Staged so each step is independently useful.
+**[→ Observability Add-On](FleetPulse-Addon-Observability.md)** — structured logging, domain
+metrics, Prometheus/Grafana, alerts, tracing. Worth more now that there are nine containers.
 
-### [→ Notification Service Add-On](FleetPulse-Addon-Notification.md)
-A third service that pushes status updates to merchants — **without introducing a message broker**.
-Uses a Postgres outbox table and a polling worker, which is also how you fix the partial-failure
-problem from §4.4 and §4.6.
+**[→ Notification Add-On](FleetPulse-Addon-Notification.md)** — a third service using a
+transactional outbox, which also removes the 207 from §4.5.
 
-Recommended order: **core → observability → notifications.** Add observability first so that when
-the notification worker misbehaves, you can already see it.
+**[→ Kubernetes](FleetPulse-Kubernetes.md)** — minikube and EKS.
+
+Recommended order: **observability → notifications → Kubernetes.** Add observability first so that
+when something misbehaves, you can already see it.

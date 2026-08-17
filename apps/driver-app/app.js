@@ -82,6 +82,10 @@ function signIn(driver) {
 
 $("#switch-driver").addEventListener("click", () => {
   stopGps();
+  // The POD modal is not one of the views showView() toggles, so it outlives a
+  // view change. Left open over the driver picker it offers a Confirm button
+  // that dereferences the state.runsheet being nulled on the next line.
+  closePod();
   state.driver = null;
   state.runsheet = null;
   session.clear("driver");
@@ -307,6 +311,14 @@ $("#pod-submit").addEventListener("click", async (e) => {
   const { awb, outcome, type } = state.pod;
   const err = $("#pod-error");
   show(err, false);
+
+  // Also reachable when openRunsheet() failed and left state.runsheet unset.
+  // Without this the next line throws inside an async listener, which surfaces
+  // as an unhandled rejection -- a Confirm button that silently does nothing.
+  if (!state.runsheet) {
+    err.textContent = "No runsheet open — reopen it and try again.";
+    return show(err);
+  }
 
   const payload = { awb, runsheet_id: state.runsheet.runsheet_id, outcome };
 

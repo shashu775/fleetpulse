@@ -3,9 +3,38 @@
 Learning Kubernetes two ways: **minikube on Docker Desktop** for daily practice, and **AWS EKS**
 for the cloud-specific skills you cannot learn locally.
 
-Continues from [FleetPulse-Simple.md](FleetPulse-Simple.md). You should have the two FastAPI
-services working under Docker Compose before starting here — putting a system you already
-understand onto Kubernetes teaches far more than starting on Kubernetes cold.
+Continues from [FleetPulse-Simple.md](FleetPulse-Simple.md). You should have the stack working under
+Docker Compose before starting here — putting a system you already understand onto Kubernetes
+teaches far more than starting on Kubernetes cold.
+
+### What you are actually porting
+
+Compose runs **five containers**, and all five have to land on Kubernetes:
+
+| Compose service | Kubernetes object | Notes |
+|---|---|---|
+| `web` | Deployment + Service | nginx: five static apps **and** the `/api/*` proxy |
+| `consignment-service` | Deployment + Service | 2 replicas, HPA |
+| `dispatch-service` | Deployment + Service | 2 replicas |
+| `postgres` | StatefulSet + headless Service + PVC | in-cluster locally; RDS on EKS |
+| `redis` | Deployment + Service | cache + GPS store, no persistence |
+
+The `web` container is the part this document originally missed, and it is the one that makes the
+port trivial. `apps/web/api_locations.conf` proxies to `http://consignment-service:8000` and
+`http://dispatch-service:8000` — **plain service names**. Docker Compose DNS and Kubernetes DNS both
+resolve those, so the nginx config moves to Kubernetes with **zero edits**, and every app keeps
+calling the API same-origin (which is why this project has no CORS configuration anywhere).
+
+That means the Ingress has exactly **one** backend — `web` — rather than one rule per service:
+
+```
+Ingress → web Service :80 ─┬─ /  /merchant/ /driver/ /hub/ /track/ /admin/   (static)
+                           ├─ /api/consignment/*  →  consignment-service:8000
+                           └─ /api/dispatch/*     →  dispatch-service:8000
+```
+
+Routing `/api/*` at the Ingress instead would work too, but it duplicates routing logic that already
+exists in a config file you ship, and it splits the origin. Keep the fan-out in `web`.
 
 ---
 
@@ -49,6 +78,11 @@ anything. **On `t3.micro` you have zero left.** Use `t3.small` minimum. This is 
 free tier — `t3.small` is not free-tier eligible, which is another reason the burst-and-destroy
 pattern matters.
 
+Count your own pods before sizing the node group. FleetPulse at the replica counts below is
+**8 pods**: `web` ×2, `consignment` ×2, `dispatch` ×2, `redis` ×1, `postgres` ×1. Add ~4 for
+`kube-system` and two `t3.small` nodes (22 slots) are comfortable — but a *single* `t3.small`
+(11 slots) leaves no room for an HPA to scale `consignment` past 3. Keep `desiredCapacity: 2`.
+
 ### 0.3 What each track teaches
 
 Do not try to learn everything on EKS. Most Kubernetes concepts are identical everywhere, and
@@ -77,6 +111,10 @@ things that are genuinely AWS.
 You have a `t3.micro` running Docker Compose. Leave it alone. It stays your always-on demo
 environment — cheap, stable, and something you can show anyone at any time. Kubernetes is additive
 here, not a replacement.
+
+The consolidation from ten containers to five (see
+[FleetPulse-Architecture-Review.md](FleetPulse-Architecture-Review.md)) helps here: five nginx
+processes became one, which is most of the reason the full stack still fits in 1 GB.
 
 (K3s would technically fit on it at ~870 MB of 958 MB, but with 88 MB of headroom it would be
 miserable to work on. minikube on your laptop is strictly better for learning.)
@@ -126,35 +164,65 @@ For the ingress hostname, add a line to
 `C:\Windows\System32\drivers\etc\hosts` (edit as Administrator):
 
 ```
-192.168.49.2   fleetpulse.local
+192.168.49.2   fleetpulse.test
 ```
 
 Replace the IP with whatever `minikube ip` printed.
+
+> **⚠️ Use `.test` here — not `.local`, and not `.localhost`.** All three are different, and two of
+> them break:
+>
+> - **`.local`** is reserved for mDNS/Bonjour by RFC 6762. Those lookups can bypass or race the hosts
+>   file, so the name resolves intermittently. (Earlier revisions of this document used
+>   `fleetpulse.local`; that was a mistake.)
+> - **`.localhost`** is reserved for *loopback* by RFC 6761, and browsers resolve `*.localhost`
+>   internally to `127.0.0.1` **without consulting the hosts file at all**. You cannot point it at
+>   minikube's IP. This is why the Compose stack uses `.localhost` — it genuinely is on loopback —
+>   and why Kubernetes cannot.
+> - **`.test`** is reserved by RFC 6761 for exactly this: testing names that resolve however you
+>   configure them. Nothing intercepts it.
+>
+> The nginx vhost blocks in `apps/web/nginx.conf` match `<app>.fleetpulse.localhost`, so they will
+> **not** fire behind a `.test` Ingress hostname — requests fall through to the default server, which
+> serves every app by path. That is fine and is the layout to use on Kubernetes. If you want the
+> per-app hostnames in-cluster, add `<app>.fleetpulse.test` to each `server_name` line and give the
+> Ingress a rule per host.
 
 ### 1.2 Directory layout
 
 Add to the structure from [FleetPulse-Simple.md](FleetPulse-Simple.md):
 
+The repo already has the empty skeleton for this — `infra/k8s/`, `infra/helm/fleetpulse/` and
+`infra/terraform/` exist. Fill them in:
+
 ```
 fleetpulse/
-├── k8s/
-│   ├── base/                       # raw manifests — learn these FIRST
-│   │   ├── 00-namespace.yaml
-│   │   ├── 01-configmap.yaml
-│   │   ├── 02-secret.yaml
-│   │   ├── 03-redis.yaml
-│   │   ├── 04-consignment.yaml
-│   │   ├── 05-dispatch.yaml
-│   │   ├── 06-ingress.yaml
-│   │   ├── 07-hpa.yaml
-│   │   └── 08-migration-job.yaml
-│   ├── overlays/
-│   │   ├── minikube/               # local Postgres, NodePort, 1 replica
-│   │   └── eks/                    # RDS, ALB ingress, 2 replicas
-│   └── helm/
-│       └── fleetpulse/             # the same thing, packaged (Milestone 7)
-└── infra/terraform/eks/            # EKS cluster as code (Milestone 8)
+└── infra/
+    ├── k8s/
+    │   ├── base/                   # raw manifests — learn these FIRST
+    │   │   ├── 00-namespace.yaml
+    │   │   ├── 01-configmap.yaml
+    │   │   ├── 02-secret.yaml
+    │   │   ├── 03-postgres.yaml    # StatefulSet + headless Service + PVC
+    │   │   ├── 04-redis.yaml
+    │   │   ├── 05-consignment.yaml
+    │   │   ├── 06-dispatch.yaml
+    │   │   ├── 07-web.yaml         # the five apps + the API proxy
+    │   │   ├── 08-ingress.yaml
+    │   │   ├── 09-hpa.yaml
+    │   │   └── 10-migration-job.yaml
+    │   └── overlays/
+    │       ├── minikube/           # in-cluster Postgres, 1 replica
+    │       └── eks/                # RDS, ALB ingress, 2 replicas
+    ├── helm/fleetpulse/            # the same thing, packaged (Milestone 7)
+    └── terraform/environments/dev/ # EKS cluster as code (Milestone 8)
 ```
+
+> **⚠️ `infra/helm/fleetpulse/` is currently an untouched `helm create` scaffold.** It deploys one
+> Deployment of the stock **`nginx`** image with a default Service, Ingress, HTTPRoute,
+> ServiceAccount and HPA. Nothing in it refers to FleetPulse. Do not read its `values.yaml` as design
+> intent and do not try to grow the chart out of it — delete `templates/` and `values.yaml` and write
+> §2 instead. `_helpers.tpl` and `.helmignore` are the only files worth keeping.
 
 Write the raw manifests first and only move to Helm once they work. Helm templates a thing you
 already understand; learning both simultaneously is how people end up confused about which layer is
@@ -163,7 +231,7 @@ broken.
 ### 1.3 Namespace, config, secrets
 
 ```yaml
-# k8s/base/00-namespace.yaml
+# infra/k8s/base/00-namespace.yaml
 # A namespace is a folder for your resources. Everything below lives here,
 # so `kubectl delete namespace fleetpulse` cleans up in one command.
 apiVersion: v1
@@ -173,7 +241,7 @@ metadata:
 ```
 
 ```yaml
-# k8s/base/01-configmap.yaml
+# infra/k8s/base/01-configmap.yaml
 # ConfigMaps hold NON-SECRET configuration. Same idea as the `environment:`
 # block in docker-compose.yml.
 apiVersion: v1
@@ -191,7 +259,7 @@ data:
 ```
 
 ```yaml
-# k8s/base/02-secret.yaml
+# infra/k8s/base/02-secret.yaml
 # ⚠️ DO NOT COMMIT A REAL PASSWORD. Kubernetes Secrets are only base64-encoded,
 # NOT encrypted. Anyone who can read the manifest can read the password.
 #
@@ -199,6 +267,7 @@ data:
 #
 #   kubectl create secret generic fleetpulse-secrets `
 #     --namespace fleetpulse `
+#     --from-literal=POSTGRES_PASSWORD="PASSWORD" `
 #     --from-literal=DATABASE_URL="postgresql://fleetadmin:PASSWORD@postgres:5432/fleetpulse"
 #
 # This file is committed only as documentation of the expected shape.
@@ -209,13 +278,117 @@ metadata:
   namespace: fleetpulse
 type: Opaque
 stringData:
+  # The password appears TWICE, in two shapes: the Postgres image wants the bare
+  # value, the services want a full URL. Compose hides this by interpolating
+  # ${POSTGRES_PASSWORD} into DATABASE_URL; Kubernetes Secrets have no
+  # interpolation, so the two values must be kept in sync by hand. Setting one
+  # and forgetting the other is a `password authentication failed` loop.
+  POSTGRES_PASSWORD: "CHANGEME"
   DATABASE_URL: "postgresql://fleetadmin:CHANGEME@postgres:5432/fleetpulse"
 ```
 
-### 1.4 Redis
+### 1.4 Postgres — the one thing that *is* a StatefulSet
+
+Compose gets away with `volumes: pgdata:`. Kubernetes needs the storage, the identity and the
+init-script wiring spelled out.
 
 ```yaml
-# k8s/base/03-redis.yaml
+# infra/k8s/base/03-postgres.yaml
+# A StatefulSet, not a Deployment: this pod has durable identity (postgres-0)
+# and a volume that must survive a restart. Compare with Redis below.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: fleetpulse
+spec:
+  clusterIP: None          # headless: gives the pod a stable DNS name
+  selector: { app: postgres }
+  ports:
+    - port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: fleetpulse
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              value: fleetadmin
+            - name: POSTGRES_DB
+              value: fleetpulse
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: fleetpulse-secrets, key: POSTGRES_PASSWORD }
+            # The image only runs /docker-entrypoint-initdb.d against an EMPTY
+            # data directory. Mounting a subdirectory keeps lost+found out of
+            # PGDATA on volume types that create one.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "fleetadmin", "-d", "fleetpulse"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { memory: "192Mi", cpu: "100m" }
+            limits:   { memory: "512Mi" }
+      volumes:
+        - name: init
+          configMap: { name: db-init-sql }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 2Gi }
+```
+
+```powershell
+# db/init.sql becomes the ConfigMap the StatefulSet mounts
+kubectl create configmap db-init-sql --namespace fleetpulse --from-file=db/init.sql
+```
+
+> **⚠️ The same trap as Compose, with a worse cleanup.** `init.sql` runs **only against an empty data
+> directory**, and so does `POSTGRES_PASSWORD`. Editing either after the first start changes nothing.
+> In Compose the fix is `docker compose down -v`; here it is:
+>
+> ```powershell
+> kubectl delete statefulset postgres -n fleetpulse
+> kubectl delete pvc data-postgres-0 -n fleetpulse    # ← the part people forget
+> ```
+>
+> **Deleting the StatefulSet does not delete the PVC.** Recreate it without that second command and
+> Postgres comes back with the old schema and the old password, and you will lose an hour to it. To
+> rotate the password on a *live* database, `ALTER USER` instead — same as Compose.
+>
+> `volumeClaimTemplates` also means the PVC survives `kubectl delete -f infra/k8s/base/`. On EKS that
+> PVC is a real EBS volume that keeps billing — see the teardown checklist in §3.1.
+
+### 1.5 Redis
+
+```yaml
+# infra/k8s/base/04-redis.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -257,15 +430,29 @@ spec:
       targetPort: 6379
 ```
 
-> **Why a Deployment and not a StatefulSet?** Redis here is a *cache*. If it restarts and loses
-> everything, the app repopulates it from Postgres — that is exactly why `cache.py` fails soft.
-> StatefulSets are for workloads whose identity and storage must survive restarts. Knowing when
-> *not* to reach for one is as useful as knowing how to use it.
+> **Why a Deployment and not a StatefulSet?** Because nothing here needs stable identity or durable
+> storage — no `volumeClaimTemplates`, no ordinal names, so a plain Deployment is correct. Compare
+> with Postgres above. Knowing when *not* to reach for a StatefulSet is as useful as knowing how to
+> use one.
+>
+> **But be honest about what a restart costs**, because the two services use this Redis differently
+> (see `docs/FleetPulse-Architecture.md`):
+>
+> | | consignment `app/cache.py` | dispatch `app/cache.py` |
+> |---|---|---|
+> | Role | **Cache** — Postgres is the truth | **Store** — nothing else holds GPS |
+> | Redis restart | Repopulates from Postgres | **Live GPS positions are gone** |
+> | On failure | Fails soft, logs, behaves like a miss | Propagates: endpoints return **503** |
+>
+> So a Redis restart is not free — it drops every in-flight driver position. That is acceptable
+> because the data is stale in 10 seconds anyway and there is no `gps_pings` table by design, not
+> because the loss is imaginary. `maxmemory 64mb` with `allkeys-lru` is the same bound Compose sets;
+> the pod's 96Mi limit sits above it so Redis evicts before the kernel OOM-kills it.
 
-### 1.5 The application Deployments
+### 1.6 The application Deployments
 
 ```yaml
-# k8s/base/04-consignment.yaml
+# infra/k8s/base/05-consignment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -343,7 +530,7 @@ spec:
 ```
 
 ```yaml
-# k8s/base/05-dispatch.yaml
+# infra/k8s/base/06-dispatch.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -397,52 +584,159 @@ spec:
       name: http
 ```
 
-### 1.6 Ingress
+### 1.7 The web tier — five apps and the API proxy
+
+The whole front end is one image and one Deployment. It is stateless, so it is the easiest workload
+in the cluster; it is also the only one that needs an image rebuild to reflect a source change,
+because there is no `--reload` equivalent for static files.
 
 ```yaml
-# k8s/base/06-ingress.yaml
-# One entry point routing to both services by URL path.
-# This replaces the "ports: 8001:8000 / 8002:8000" from docker-compose.
+# infra/k8s/base/07-web.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: fleetpulse
+  labels: { app: web }
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      containers:
+        - name: web
+          image: fleetpulse/web:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http
+          resources:
+            requests: { memory: "24Mi", cpu: "10m" }
+            limits:   { memory: "96Mi" }
+          # /healthz is served by nginx itself (apps/web/api_locations.conf) and
+          # touches no backend — exactly what a liveness probe should be.
+          readinessProbe:
+            httpGet: { path: /healthz, port: 80 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 80 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: fleetpulse
+spec:
+  type: ClusterIP
+  selector: { app: web }
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http
+```
+
+Build it from the **repo root**, not from `apps/web/` — the image needs both `apps/` and
+`packages/`:
+
+```powershell
+minikube docker-env | Invoke-Expression
+docker build -f apps/web/Dockerfile -t fleetpulse/web:latest .
+```
+
+Two things about this pod that are not obvious:
+
+> **The `httpGet` probe works, but a `wget`-based one would not.** In `nginx:alpine`, `localhost`
+> resolves to `::1` while `listen 80` binds IPv4 only, so the Dockerfile's `HEALTHCHECK` deliberately
+> uses `127.0.0.1`. Kubernetes `httpGet` probes are sent to the **pod IP**, not to `localhost`, so
+> they sidestep this entirely — Docker's `HEALTHCHECK` is ignored by Kubernetes. If you ever convert
+> the probe to `exec: ["wget", ...]`, keep `127.0.0.1` or every web pod reports unready while serving
+> perfectly.
+
+> **⚠️ nginx resolves its upstreams once, at startup.** `proxy_pass http://consignment-service:8000/`
+> with a literal hostname and no `resolver` directive is resolved when the config loads and cached
+> for the life of the process. A Service's ClusterIP is stable, so this is fine day to day — but if
+> you delete and recreate the `consignment-service` Service (a `helm uninstall` / `helm install`
+> cycle does exactly that), it gets a **new** ClusterIP and the running web pods keep proxying to the
+> old one. Symptom: static pages load fine, every `/api/*` call times out, and the backend pods look
+> healthy. Fix: `kubectl rollout restart deploy/web -n fleetpulse`. The durable fix is a `resolver`
+> pointing at CoreDNS plus a variable in `proxy_pass`, which forces per-request resolution:
+>
+> ```nginx
+> resolver kube-dns.kube-system.svc.cluster.local valid=10s;
+> set $consignment "consignment-service.fleetpulse.svc.cluster.local:8000";
+> proxy_pass http://$consignment/api/;
+> ```
+>
+> Do not make that change lightly — those names do not exist under Compose, so it would fork
+> `api_locations.conf` per environment. Restarting the Deployment is usually the better trade.
+
+### 1.8 Ingress
+
+One entry point, one backend. This replaces the `ports: 80:80` line from docker-compose.
+
+```yaml
+# infra/k8s/base/08-ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: fleetpulse
   namespace: fleetpulse
-  annotations:
-    # Strip the /consignment or /dispatch prefix before forwarding, so your
-    # FastAPI routes stay unchanged.
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
 spec:
   ingressClassName: nginx
   rules:
-    - host: fleetpulse.local
+    - host: fleetpulse.test
       http:
         paths:
-          - path: /consignment(/|$)(.*)
-            pathType: ImplementationSpecific
+          # Everything. web serves the static apps and proxies /api/* itself.
+          - path: /
+            pathType: Prefix
             backend:
               service:
-                name: consignment-service
-                port: { number: 8000 }
-          - path: /dispatch(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: dispatch-service
-                port: { number: 8000 }
+                name: web
+                port: { number: 80 }
 ```
+
+No `rewrite-target` annotation, and that is the point: the paths the browser requests are the paths
+`apps/web/nginx.conf` already expects. Rewriting here would break the apps' relative asset paths
+(`./api.js`, `./base.css`) in exactly the way absolute paths do under Compose.
+
+The two backend Services stay `ClusterIP` with no Ingress rule of their own — the same posture as
+Compose, where `8001` and `8002` are bound to `127.0.0.1` for Swagger and nothing else. Reach them
+the same way:
 
 ```powershell
-# After applying, with fleetpulse.local in your hosts file:
-curl http://fleetpulse.local/consignment/health
-curl http://fleetpulse.local/dispatch/health
-# Swagger UI: http://fleetpulse.local/consignment/docs
+# After applying, with fleetpulse.test in your hosts file:
+curl http://fleetpulse.test/healthz              # nginx itself
+curl http://fleetpulse.test/health/consignment   # proxied through web
+curl http://fleetpulse.test/health/dispatch
+curl http://fleetpulse.test/api/consignment/v1/waybills
+
+# Open the apps
+start http://fleetpulse.test/merchant/
+start http://fleetpulse.test/admin/
+
+# Swagger has no public route by design — port-forward to it
+kubectl port-forward -n fleetpulse svc/consignment-service 8001:8000
+# then http://127.0.0.1:8001/docs
 ```
 
-### 1.7 Database migration as a Job
+### 1.9 Database migration as a Job
+
+The StatefulSet in §1.4 already runs `init.sql` on first boot, which covers a fresh cluster. A Job is
+the right tool once the database outlives the cluster — an existing RDS instance on EKS, or a PVC you
+deliberately kept.
 
 ```yaml
-# k8s/base/08-migration-job.yaml
+# infra/k8s/base/10-migration-job.yaml
 # A Job runs to completion and stops — the right tool for schema migrations.
 # Kubernetes will retry it up to backoffLimit times if it fails.
 apiVersion: batch/v1
@@ -478,32 +772,61 @@ spec:
           configMap: { name: db-init-sql }
 ```
 
-```powershell
-# Load your existing init.sql into a ConfigMap the Job can mount
-kubectl create configmap db-init-sql --namespace fleetpulse --from-file=db/init.sql
-```
+It mounts the same `db-init-sql` ConfigMap the StatefulSet uses, so there is one copy of the schema
+in the cluster. Because `init.sql` uses `CREATE TABLE IF NOT EXISTS`, re-running the Job is safe.
+Idempotent migrations are a habit worth forming now.
 
-Because `init.sql` uses `CREATE TABLE IF NOT EXISTS`, re-running the Job is safe. Idempotent
-migrations are a habit worth forming now.
-
-### 1.8 Deploy it
+### 1.10 Deploy it
 
 ```powershell
-# Build images INTO minikube's Docker daemon (no registry needed)
+# Build all THREE images into minikube's Docker daemon (no registry needed)
 minikube docker-env | Invoke-Expression
 docker build -t fleetpulse/consignment-service:latest ./services/consignment-service
-docker build -t fleetpulse/dispatch-service:latest ./services/dispatch-service
+docker build -t fleetpulse/dispatch-service:latest    ./services/dispatch-service
+docker build -f apps/web/Dockerfile -t fleetpulse/web:latest .   # <- repo root as context
 
-# Create the secret (never from a committed file)
+kubectl create namespace fleetpulse
+
+# Create the secret (never from a committed file). Both keys, same password.
 kubectl create secret generic fleetpulse-secrets --namespace fleetpulse `
+  --from-literal=POSTGRES_PASSWORD="localpass" `
   --from-literal=DATABASE_URL="postgresql://fleetadmin:localpass@postgres:5432/fleetpulse"
 
-kubectl apply -f k8s/base/
+# The schema, as a ConfigMap that both Postgres and the migration Job mount
+kubectl create configmap db-init-sql --namespace fleetpulse --from-file=db/init.sql
+
+kubectl apply -f infra/k8s/base/
 
 kubectl get pods -n fleetpulse -w      # Ctrl+C when everything is Running
 ```
 
-### 1.9 The kubectl commands you will actually use
+Expect **8 pods**: `web` ×2, `consignment-service` ×2, `dispatch-service` ×2, `redis` ×1,
+`postgres-0` ×1.
+
+Order matters less than it looks. `depends_on: service_healthy` has no Kubernetes equivalent — pods
+start in parallel, and the service pods will crash-loop for the first ~30 seconds while Postgres
+initialises. That is normal and self-correcting; `restartPolicy: Always` is the mechanism Compose's
+`depends_on` was standing in for. Only worry if they are still restarting after a minute.
+
+### 1.11 Seeding data — the simulator
+
+The driver app and admin console are empty until runsheets exist, exactly as under Compose. **Do not
+run the simulator with local `python`** — this project has no usable local interpreter (`python`
+resolves to the Microsoft Store stub). Run it as a Job inside the cluster, where the service names it
+expects already resolve:
+
+```powershell
+minikube docker-env | Invoke-Expression
+docker build -t fleetpulse/simulator:latest ./simulator
+
+kubectl run simulator -n fleetpulse --rm -it --restart=Never `
+  --image=fleetpulse/simulator:latest --image-pull-policy=IfNotPresent `
+  --env="CONSIGNMENT_URL=http://consignment-service:8000" `
+  --env="DISPATCH_URL=http://dispatch-service:8000" `
+  -- --parcels 20
+```
+
+### 1.12 The kubectl commands you will actually use
 
 Learn these six and you can debug almost anything:
 
@@ -537,13 +860,24 @@ kubectl get events -n fleetpulse --sort-by='.lastTimestamp'
 | `ImagePullBackOff` | Cannot fetch the image | Did you run `minikube docker-env`? Is the tag right? |
 | `CrashLoopBackOff` | Container starts then exits | `kubectl logs <pod> --previous` |
 | `Pending` | Cannot be scheduled | `kubectl describe pod` → insufficient CPU/memory? |
-| `0/2 Ready` | Running but readiness failing | Is `/health` actually returning 200? |
-| `CreateContainerConfigError` | Missing ConfigMap or Secret | Did you create the secret? |
+| `0/2 Ready` | Running but readiness failing | Is `/health` (or `/healthz` on web) returning 200? |
+| `CreateContainerConfigError` | Missing ConfigMap or Secret | Did you create the secret **and** `db-init-sql`? |
 
-### 1.10 Autoscaling — and using your simulator to prove it
+**FleetPulse-specific symptoms that are not in that table:**
+
+| Symptom | Cause |
+|---|---|
+| Apps load, every `/api/*` call times out | web cached a dead ClusterIP — `kubectl rollout restart deploy/web` (§1.7) |
+| `RuntimeError: DATABASE_URL is not set` | `envFrom.secretRef` missing or the Secret has the wrong key name |
+| `password authentication failed` | `POSTGRES_PASSWORD` and `DATABASE_URL` in the Secret disagree (§1.3) |
+| `relation "consignment.waybills" does not exist` | The PVC predates the ConfigMap — `init.sql` never ran (§1.4) |
+| CSS/JS 404s under `/merchant/` | Image built with `apps/web/` as context instead of the repo root |
+| GPS endpoints return 503 | Redis unreachable. Correct behaviour — dispatch's Redis is a store, not a cache |
+
+### 1.13 Autoscaling — and using your simulator to prove it
 
 ```yaml
-# k8s/base/07-hpa.yaml
+# infra/k8s/base/09-hpa.yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -574,14 +908,28 @@ spec:
 # Terminal 1 — watch it scale
 kubectl get hpa -n fleetpulse -w
 
-# Terminal 2 — generate load with the simulator you already wrote
-python simulator/simulate_delhivery_scans.py --parcels 500 --delay 0
+# Terminal 2 — generate load with the simulator you already wrote, in-cluster
+kubectl run loadgen -n fleetpulse --rm -it --restart=Never `
+  --image=fleetpulse/simulator:latest --image-pull-policy=IfNotPresent `
+  --env="CONSIGNMENT_URL=http://consignment-service:8000" `
+  --env="DISPATCH_URL=http://dispatch-service:8000" `
+  -- --parcels 500 --delay 0
 ```
 
 Watching replicas climb from 2 to 6 under your own load generator, then settle back down, is the
 moment autoscaling stops being abstract. **HPA requires `resources.requests.cpu` to be set** — the
 target percentage is measured against the request. Without it the HPA reports `<unknown>` and never
 scales, which is the single most common HPA problem.
+
+Two FleetPulse-specific things this experiment will teach you:
+
+- **`consignment-service` is the only workload worth autoscaling.** It is the system of record and
+  every dispatch call funnels through it. `web` serves static bytes at ~10m CPU and will never be the
+  bottleneck; `dispatch-service` is limited by how fast consignment answers, so scaling it just
+  queues more load against a service that is already saturated.
+- **Postgres does not scale, and it is the real ceiling.** Push hard enough and the connection count
+  becomes the limit — new consignment pods each open their own pool. When `503`s appear while CPU
+  still looks fine, you have found the wall, and *that* is the interesting result of the exercise.
 
 ---
 
@@ -590,23 +938,30 @@ scales, which is the single most common HPA problem.
 Only do this once the raw manifests work. Helm's value is templating one chart across environments;
 without that need it is just extra syntax.
 
+**Start by emptying the scaffold.** `infra/helm/fleetpulse/` currently holds an untouched
+`helm create` output — a stock nginx Deployment, plus `hpa.yaml`, `httproute.yaml`, `ingress.yaml`,
+`serviceaccount.yaml` and `tests/test-connection.yaml` that describe a chart nobody wrote. Delete
+`values.yaml` and everything in `templates/` except `_helpers.tpl`, then build this:
+
 ```
-k8s/helm/fleetpulse/
+infra/helm/fleetpulse/
 ├── Chart.yaml
 ├── values.yaml               # defaults
 ├── values-minikube.yaml      # local overrides
 ├── values-eks.yaml           # cloud overrides
 └── templates/
-    ├── _helpers.tpl
+    ├── _helpers.tpl          # keep from the scaffold
     ├── configmap.yaml
-    ├── deployment.yaml       # ONE template, looped over both services
+    ├── deployment.yaml       # ONE template, looped over all THREE workloads
     ├── service.yaml
     ├── ingress.yaml
-    └── hpa.yaml
+    ├── hpa.yaml
+    ├── redis.yaml
+    └── postgres.yaml         # {{- if .Values.postgres.enabled }} — off on EKS
 ```
 
 ```yaml
-# k8s/helm/fleetpulse/values.yaml
+# infra/helm/fleetpulse/values.yaml
 global:
   namespace: fleetpulse
   imageRegistry: ""            # "" locally; ECR URL on EKS
@@ -615,34 +970,59 @@ global:
 services:
   consignment:
     name: consignment-service
+    image: fleetpulse/consignment-service
     replicas: 2
     port: 8000
+    healthPath: /health
     resources:
       requests: { memory: 96Mi, cpu: 50m }
       limits:   { memory: 256Mi }
     autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 8, targetCPU: 60 }
   dispatch:
     name: dispatch-service
+    image: fleetpulse/dispatch-service
     replicas: 2
     port: 8000
+    healthPath: /health
     resources:
       requests: { memory: 96Mi, cpu: 50m }
       limits:   { memory: 256Mi }
+    autoscaling: { enabled: false }
+  # The web tier templates from the same loop: different port, different probe
+  # path, no envFrom needed — it reads no configuration at runtime.
+  web:
+    name: web
+    image: fleetpulse/web
+    replicas: 2
+    port: 80
+    healthPath: /healthz
+    needsConfig: false
+    resources:
+      requests: { memory: 24Mi, cpu: 10m }
+      limits:   { memory: 96Mi }
     autoscaling: { enabled: false }
 
 redis:
   enabled: true
 
+# In-cluster Postgres for minikube. values-eks.yaml sets this false and points
+# DATABASE_URL at RDS instead — the one real difference between the two
+# environments, and the reason this is a Helm chart rather than a directory of
+# YAML.
+postgres:
+  enabled: true
+  storage: 2Gi
+
 ingress:
   enabled: true
   className: nginx
-  host: fleetpulse.local
+  host: fleetpulse.test
   annotations: {}
 ```
 
 ```yaml
-# k8s/helm/fleetpulse/templates/deployment.yaml
-# range over .Values.services generates BOTH Deployments from one template.
+# infra/helm/fleetpulse/templates/deployment.yaml
+# range over .Values.services generates ALL THREE Deployments from one template.
 {{- range $key, $svc := .Values.services }}
 ---
 apiVersion: apps/v1
@@ -669,33 +1049,35 @@ spec:
     spec:
       containers:
         - name: {{ $key }}
-          image: "{{ if $.Values.global.imageRegistry }}{{ $.Values.global.imageRegistry }}/{{ end }}fleetpulse/{{ $svc.name }}:{{ $.Values.global.imageTag }}"
+          image: "{{ if $.Values.global.imageRegistry }}{{ $.Values.global.imageRegistry }}/{{ end }}{{ $svc.image }}:{{ $.Values.global.imageTag }}"
           ports:
             - containerPort: {{ $svc.port }}
+          {{- if ne $svc.needsConfig false }}
           envFrom:
             - configMapRef: { name: fleetpulse-config }
             - secretRef:    { name: fleetpulse-secrets }
+          {{- end }}
           resources: {{- toYaml $svc.resources | nindent 12 }}
           readinessProbe:
-            httpGet: { path: /health, port: {{ $svc.port }} }
+            httpGet: { path: {{ $svc.healthPath }}, port: {{ $svc.port }} }
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
-            httpGet: { path: /health, port: {{ $svc.port }} }
+            httpGet: { path: {{ $svc.healthPath }}, port: {{ $svc.port }} }
             initialDelaySeconds: 15
             periodSeconds: 20
 {{- end }}
 ```
 
 ```powershell
-helm lint k8s/helm/fleetpulse
+helm lint infra/helm/fleetpulse
 
 # See the generated YAML WITHOUT installing — do this before every install
-helm template fleetpulse k8s/helm/fleetpulse -f k8s/helm/fleetpulse/values-minikube.yaml
+helm template fleetpulse infra/helm/fleetpulse -f infra/helm/fleetpulse/values-minikube.yaml
 
-helm upgrade --install fleetpulse k8s/helm/fleetpulse `
+helm upgrade --install fleetpulse infra/helm/fleetpulse `
   --namespace fleetpulse --create-namespace `
-  -f k8s/helm/fleetpulse/values-minikube.yaml
+  -f infra/helm/fleetpulse/values-minikube.yaml
 
 helm history fleetpulse -n fleetpulse
 helm rollback fleetpulse 1 -n fleetpulse     # instant rollback — try this!
@@ -703,6 +1085,15 @@ helm rollback fleetpulse 1 -n fleetpulse     # instant rollback — try this!
 
 That `checksum/config` annotation is a genuinely useful trick: edit a ConfigMap without it and
 nothing happens, because Kubernetes has no reason to restart pods. Many people lose an hour to this.
+
+> **⚠️ `helm uninstall` deletes the Services, and web will not notice.** Reinstalling gives
+> `consignment-service` a new ClusterIP while the web pods keep proxying to the old one (§1.7).
+> `helm upgrade` is safe — it patches Services in place. If you do a full uninstall/install cycle,
+> follow it with `kubectl rollout restart deploy/web -n fleetpulse`.
+>
+> `helm uninstall` also leaves `data-postgres-0` behind — PVCs from `volumeClaimTemplates` are not
+> Helm-managed. Reinstalling reattaches the old database with the old password. Delete the PVC
+> explicitly when you want a clean slate.
 
 ---
 
@@ -807,6 +1198,17 @@ image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/fleetpulse/consignment-servi
 imagePullPolicy: IfNotPresent
 ```
 
+You need **three** repositories, not two — `fleetpulse/web` is an image like any other:
+
+```powershell
+foreach ($r in "consignment-service","dispatch-service","web") {
+  aws ecr create-repository --repository-name "fleetpulse/$r" --region us-east-1
+}
+```
+
+Setting `global.imageRegistry` to the ECR host is the only chart change; that is precisely what the
+`imageRegistry` value in §2 exists for.
+
 **2. Ingress becomes a real ALB.** Install the AWS Load Balancer Controller:
 
 ```powershell
@@ -826,7 +1228,7 @@ helm install aws-load-balancer-controller eks/aws-load-balancer-controller `
 ```
 
 ```yaml
-# k8s/overlays/eks/ingress.yaml
+# infra/k8s/overlays/eks/ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -835,22 +1237,20 @@ metadata:
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/healthcheck-path: /health
+    # nginx's own check — cheap, and it does not depend on a backend.
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
     # ⚠️ An ALB costs ~$16/month if you forget to delete it.
     alb.ingress.kubernetes.io/tags: Project=fleetpulse,DeleteMe=true
 spec:
   ingressClassName: alb
   rules:
+    # No host rule: you get an ALB DNS name, and there is no hosts file to edit.
     - http:
         paths:
-          - path: /consignment
+          - path: /
             pathType: Prefix
             backend:
-              service: { name: consignment-service, port: { number: 8000 } }
-          - path: /dispatch
-            pathType: Prefix
-            backend:
-              service: { name: dispatch-service, port: { number: 8000 } }
+              service: { name: web, port: { number: 80 } }
 ```
 
 ```powershell
@@ -858,6 +1258,18 @@ spec:
 kubectl get ingress -n fleetpulse
 # ADDRESS shows the ALB DNS name — that is your public URL
 ```
+
+> **⚠️ This puts the whole platform on the public internet, and FleetPulse has no authentication of
+> any kind.** The admin console can create runsheets and read every parcel; the driver "login" is a
+> `localStorage` picker. Under Compose that is contained by binding everything except port 80 to
+> `127.0.0.1`. An internet-facing ALB removes that containment completely — anyone who finds the DNS
+> name is an admin.
+>
+> For a burst learning session with fake parcel data that is an acceptable trade, but make it a
+> decision rather than an accident. The cheap mitigations, in order of effort:
+> `alb.ingress.kubernetes.io/inbound-cidrs` restricted to your own IP; `scheme: internal` plus
+> `kubectl port-forward`; or skipping the ALB and using `port-forward` alone. The ALB is worth
+> provisioning once to see it work — it is the whole point of the session — then tearing down.
 
 **3. Connecting to your existing RDS.** Your RDS security group only allows the old EC2 instance.
 Add the EKS nodes:
@@ -902,7 +1314,7 @@ Do the eksctl version first to understand the shape, then rebuild it in Terrafor
 version that belongs in your repo.
 
 ```hcl
-# infra/terraform/eks/main.tf
+# infra/terraform/environments/dev/main.tf
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.13"
@@ -1017,16 +1429,30 @@ Extends the pipeline from [FleetPulse-Simple.md §3](FleetPulse-Simple.md).
         if: steps.check.outputs.exists == 'true'
         run: |
           aws eks update-kubeconfig --name fleetpulse-tf --region us-east-1
-          helm upgrade --install fleetpulse k8s/helm/fleetpulse \
+          helm upgrade --install fleetpulse infra/helm/fleetpulse \
             --namespace fleetpulse --create-namespace \
-            -f k8s/helm/fleetpulse/values-eks.yaml \
+            -f infra/helm/fleetpulse/values-eks.yaml \
             --set global.imageTag=${{ github.sha }} \
             --wait --timeout 5m
           kubectl rollout status deploy/consignment-service -n fleetpulse
+          kubectl rollout status deploy/web -n fleetpulse
 ```
 
 `--wait --timeout 5m` makes Helm block until pods are actually Ready, so a broken deploy fails the
 pipeline instead of reporting success while pods crash-loop.
+
+The `build-and-push` job it depends on has to build **three** images. Two notes specific to this
+repo:
+
+- **`web` builds from the repo root**, not from `apps/web/` — `context: .` with
+  `file: apps/web/Dockerfile`, because the image needs `apps/` *and* `packages/`. Using `apps/web`
+  as the context produces an image that builds cleanly and 404s every stylesheet.
+- **Tests run as a Docker build stage**, so CI needs no Postgres or Redis service container:
+  `docker build --target test -t fp-consignment-test ./services/consignment-service` then
+  `docker run --rm fp-consignment-test`. That property is deliberate — see the testing notes in
+  `CLAUDE.md` — and it is what keeps the test job to a single step with no `services:` block.
+- The front end has **no build step and no `node_modules`**: `web` is plain HTML/CSS/ES modules
+  copied into nginx. There is no `npm ci` stage to add.
 
 ---
 
@@ -1037,14 +1463,17 @@ Four milestones continuing from Simple's Milestone 4. Roughly 3–4 weeks.
 ### Milestone 5 — minikube fundamentals (Week 1)
 
 - [ ] Install minikube, kubectl, Helm; start a cluster; enable `ingress` and `metrics-server`
-- [ ] Write `00-namespace` through `05-dispatch` by hand — **type them, do not paste**
-- [ ] Build images into minikube's daemon; deploy; reach `/health` via `port-forward`
+- [ ] Write `00-namespace` through `06-dispatch` by hand — **type them, do not paste**
+- [ ] Build all three images into minikube's daemon; deploy; reach `/health` via `port-forward`
+- [ ] Get Postgres up **with** the `db-init-sql` ConfigMap; confirm `\dt consignment.*` in `psql`
 - [ ] Deliberately break something (wrong image tag) and diagnose it with `describe` + `logs`
-- [ ] Add the Ingress; reach both services through `fleetpulse.local`
-- [ ] Run the migration Job against an in-cluster Postgres
+- [ ] Add `07-web` and the Ingress; open `http://fleetpulse.test/merchant/` in a browser
+- [ ] Delete and recreate the `consignment-service` Service; watch `/api/*` break; fix it with
+      `rollout restart deploy/web` — **this is the gotcha most worth experiencing once**
 
-> ✅ **Checkpoint:** `simulate_delhivery_scans.py` pointed at `fleetpulse.local` runs end to end.
-> 🎉 You have deployed a real multi-service app to Kubernetes.
+> ✅ **Checkpoint:** the simulator Job runs end to end, then you book a parcel in the Merchant Portal
+> at `fleetpulse.test` and track it in the Customer app. 🎉 You have deployed a real multi-service
+> app — front end included — to Kubernetes.
 
 ### Milestone 6 — Operating it (Week 2)
 
@@ -1061,8 +1490,9 @@ Four milestones continuing from Simple's Milestone 4. Roughly 3–4 weeks.
 
 ### Milestone 7 — Helm (Week 3)
 
-- [ ] Convert the manifests to a chart with one templated Deployment
-- [ ] `values-minikube.yaml` and `values-eks.yaml`
+- [ ] **Empty the `helm create` scaffold first** — keep `_helpers.tpl`, delete the rest
+- [ ] Convert the manifests to a chart with one templated Deployment covering all three workloads
+- [ ] `values-minikube.yaml` (`postgres.enabled: true`) and `values-eks.yaml` (`false` + RDS URL)
 - [ ] `helm template` to inspect output before installing
 - [ ] Add the `checksum/config` annotation; prove a ConfigMap edit restarts pods
 - [ ] `helm rollback` to a previous revision
@@ -1121,10 +1551,10 @@ the thing rather than following a tutorial.
 
 | Environment | What runs there | Cost | Purpose |
 |---|---|---|---|
-| **Docker Compose (local)** | Everything | $0 | Fast day-to-day development |
-| **minikube (local)** | Full stack on Kubernetes | $0 | Kubernetes learning, unlimited |
-| **EC2 + Compose (AWS)** | 2 services + Redis | $0 free tier | Always-on demo you can show anyone |
-| **EKS (AWS)** | Full stack + ALB + IRSA | ~$5/mo burst | Cloud-Kubernetes skills |
+| **Docker Compose (local)** | All 5 containers | $0 | Fast day-to-day development |
+| **minikube (local)** | Same 5, as 8 pods | $0 | Kubernetes learning, unlimited |
+| **EC2 + Compose (AWS)** | All 5 containers | $0 free tier | Always-on demo you can show anyone |
+| **EKS (AWS)** | 8 pods + ALB + IRSA | ~$5/mo burst | Cloud-Kubernetes skills |
 
 Keep all four. They serve different purposes, and being able to explain why you have each one is
 itself the architectural judgement that interviews are testing.

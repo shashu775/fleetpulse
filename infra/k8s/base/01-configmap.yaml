@@ -1,0 +1,14 @@
+# ConfigMaps hold NON-SECRET configuration. Same idea as the `environment:`
+# block in docker-compose.yml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fleetpulse-config
+  namespace: fleetpulse
+data:
+  LOG_LEVEL: "INFO"
+  REDIS_URL: "redis://redis:6379/0"
+  # Kubernetes DNS: "consignment-service" resolves to that Service inside the
+  # namespace. Exactly like Docker Compose's service-name DNS -- same idea,
+  # different implementation. This is why no application code changes.
+  CONSIGNMENT_URL: "http://consignment-service:8000"

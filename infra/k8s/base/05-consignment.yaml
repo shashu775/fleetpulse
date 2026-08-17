@@ -1,0 +1,87 @@
+# The system of record. Owns ALLOWED_TRANSITIONS and returns 409 on illegal
+# status moves -- dispatch-service must never write to the consignment schema.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consignment-service
+  namespace: fleetpulse
+  labels: { app: consignment-service }
+spec:
+  replicas: 2
+  # How Kubernetes replaces pods during an update: create one new pod, wait for
+  # it to be Ready, then remove an old one. Zero downtime.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels: { app: consignment-service }
+  template:
+    metadata:
+      labels: { app: consignment-service }
+    spec:
+      containers:
+        - name: consignment
+          image: fleetpulse/consignment-service:latest
+          # IfNotPresent is correct for minikube, where the image is built
+          # straight into the node's Docker daemon and there is no registry to
+          # pull from.
+          #
+          # /!\ It is WRONG on EKS with a :latest tag. The kubelet finds the
+          #     cached image and never re-pulls, so `kubectl set image` with an
+          #     unchanged tag is a silent no-op and your rollout reports success
+          #     while running old code. The eks overlay must either use an
+          #     immutable tag (git SHA) -- preferred, because it also makes
+          #     `kubectl rollout undo` meaningful -- or set Always.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+
+          # Non-secret config from the ConfigMap, secrets from the Secret.
+          envFrom:
+            - configMapRef: { name: fleetpulse-config }
+            - secretRef:    { name: fleetpulse-secrets }
+
+          resources:
+            requests: { memory: "96Mi", cpu: "50m" }
+            limits:   { memory: "256Mi" }
+            # NOTE: no CPU limit on purpose. CPU limits cause throttling that
+            # shows up as mysterious slow requests. Set requests accurately and
+            # let the pod burst.
+
+          # READINESS: "can this pod serve traffic right now?"
+          # If it fails, the pod is removed from the Service -- but NOT restarted.
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+
+          # LIVENESS: "is this process broken beyond recovery?"
+          # If it fails, the pod is KILLED and restarted. Keep this check simple
+          # -- never make it depend on the database. A DB blip would otherwise
+          # restart every pod at once and turn a small problem into an outage.
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: consignment-service
+  namespace: fleetpulse
+spec:
+  type: ClusterIP          # internal only. No Ingress rule of its own -- the
+                           # same posture as Compose's 127.0.0.1:8001 binding.
+                           # Reach Swagger with:
+                           #   kubectl port-forward -n fleetpulse \
+                           #     svc/consignment-service 8001:8000
+  selector: { app: consignment-service }
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http

@@ -1,0 +1,42 @@
+# A Job runs to completion and stops -- the right tool for schema migrations.
+# Kubernetes retries it up to backoffLimit times if it fails.
+#
+# The StatefulSet in 03-postgres.yaml already runs init.sql on first boot, which
+# covers a fresh cluster. This Job is what you need once the database outlives
+# the cluster: an existing RDS instance on EKS, or a PVC you deliberately kept.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: fleetpulse
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300     # auto-delete 5 min after success
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: postgres:16-alpine
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: fleetpulse-secrets, key: DATABASE_URL }
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "Running migrations..."
+              psql "$DATABASE_URL" -f /sql/init.sql
+              echo "Done."
+          volumeMounts:
+            - name: sql
+              mountPath: /sql
+      volumes:
+        # The SAME ConfigMap the StatefulSet mounts, so there is exactly one
+        # copy of the schema in the cluster:
+        #   kubectl create configmap db-init-sql -n fleetpulse --from-file=db/init.sql
+        - name: sql
+          configMap: { name: db-init-sql }
+# Because init.sql uses CREATE TABLE IF NOT EXISTS throughout, re-running this
+# Job is safe. Idempotent migrations are a habit worth forming now.

@@ -1,7 +1,8 @@
 # How FleetPulse Works
 
-The architecture and runtime behaviour of the whole system: five front-end applications, one
-gateway, two backend microservices, PostgreSQL and Redis — ten containers, one command.
+The architecture and runtime behaviour of the whole system: five front-end applications served by a
+single nginx container, two backend microservices, PostgreSQL and Redis — **five containers**, one
+command.
 
 Companion documents: [FleetPulse-Apps.md](FleetPulse-Apps.md) (front-end structure and the full API
 surface) and [FleetPulse-Simple.md](FleetPulse-Simple.md) (the build plan).
@@ -36,21 +37,22 @@ flowchart TB
         O["🎛️ Operations"]
     end
 
-    GW["<b>gateway</b> :80<br/>nginx — one origin<br/>host + path routing · API proxy"]
+    subgraph GWB["<b>web</b> :80 — one nginx container"]
+        GW["host + path routing · API proxy<br/>one origin, so no CORS anywhere"]
+        subgraph APPS["Static apps served from this image (no build step)"]
+            MP["/merchant/"]
+            HA["/hub/"]
+            DA["/driver/"]
+            CP["/track/"]
+            AC["/admin/"]
+        end
+    end
 
     M --> GW
     H --> GW
     D --> GW
     C --> GW
     O --> GW
-
-    subgraph APPS["Static apps (nginx, no build step)"]
-        MP["merchant-portal<br/>/merchant/ · :3001"]
-        HA["hub-app<br/>/hub/ · :3003"]
-        DA["driver-app<br/>/driver/ · :3002"]
-        CP["customer-portal<br/>/track/ · :3004"]
-        AC["admin-console<br/>/admin/ · :3005"]
-    end
 
     GW --> MP & HA & DA & CP & AC
 
@@ -70,28 +72,37 @@ flowchart TB
     DS --> PG & RD
 ```
 
-Ten containers. Every app is reachable three ways — its own hostname
-(`driver.fleetpulse.localhost`), a path under localhost (`/driver/`), or its direct port (`:3002`) —
-and all three are always live. See [FleetPulse-Apps.md §1](FleetPulse-Apps.md).
+**Five containers.** Every app is reachable two ways — its own hostname
+(`driver.fleetpulse.localhost`) or a path under localhost (`/driver/`), both always live. See
+[FleetPulse-Apps.md §1](FleetPulse-Apps.md).
+
+> This was ten containers until recently: a gateway plus one nginx per app. They were consolidated
+> because static assets have no independent scaling profile, no state and no independent lifecycle
+> — and since every app embeds `packages/web-shared`, a change there rebuilt all five images
+> anyway. The per-app ports 3001–3005 no longer exist. See
+> [FleetPulse-Architecture-Review.md](FleetPulse-Architecture-Review.md).
 
 ### 2.1 Component responsibilities
 
 | Component | Owns | Notes |
 |---|---|---|
-| **gateway** | Nothing | nginx. Launcher + host/path routing + API proxy |
-| **merchant-portal** | Nothing | Booking. Bulk upload and labels not built |
-| **hub-app** | Nothing | High-speed inbound/outbound scanning |
-| **driver-app** | Nothing | Runsheets, out-for-delivery scan, POD, GPS |
-| **customer-portal** | Nothing | Public tracking; the AWB is the only credential |
-| **admin-console** | Nothing | Network-wide ops. **The only place a runsheet can be created** |
+| **web** | Nothing | nginx. Serves all five apps as static files, proxies `/api/*`, hosts the launcher |
+| ↳ `/merchant/` | — | Booking. Bulk upload and labels not built |
+| ↳ `/hub/` | — | High-speed inbound/outbound scanning |
+| ↳ `/driver/` | — | Runsheets, out-for-delivery scan, POD, GPS |
+| ↳ `/track/` | — | Public tracking; the AWB is the only credential |
+| ↳ `/admin/` | — | Network-wide ops. **The only place a runsheet can be created** |
 | **consignment-service** | Waybills, scan events, parcel status | **System of record.** Owns `ALLOWED_TRANSITIONS` |
 | **dispatch-service** | Runsheets, stops, delivery attempts, POD | Drives the last three transitions, performs none of them |
 | **PostgreSQL** | Durable truth | One database, two schemas |
 | **Redis** | Tracking cache + last-known GPS | Two roles with opposite failure semantics (§6.2) |
 
-All five app containers hold **no state and no database access**. They are static HTML, CSS and ES
-modules served by nginx, calling HTTP APIs through the gateway. That is why adding a sixth app, or
-rewriting one in React, changes nothing behind the gateway.
+The web tier holds **no state and no database access**. It is static HTML, CSS and ES modules,
+calling HTTP APIs. That is why adding a sixth app, or rewriting one in React, changes nothing
+behind it.
+
+**Every port except `80` binds `127.0.0.1`.** Before that was fixed, Postgres, Redis (no password)
+and the admin console were reachable from the whole LAN.
 
 ### 2.2 Three rules that define the design
 
@@ -103,8 +114,8 @@ that rule would live in two places and eventually disagree. All cross-service tr
 **2. Dependencies point one way.** Dispatch → consignment, never the reverse. Circular service
 dependencies create startup-ordering problems and cascading timeouts.
 
-**3. Front-ends never talk to a database.** They call HTTP APIs through the gateway. Obvious, but it
-is why swapping any app for React, or adding a sixth, changes nothing behind the gateway. The admin
+**3. Front-ends never talk to a database.** They call HTTP APIs through the web tier. Obvious, but it
+is why swapping any app for React, or adding a sixth, changes nothing behind it. The admin
 console proved this: it was built entirely from endpoints that already existed.
 
 ---
@@ -180,13 +191,13 @@ future service split impossible. AWBs are validated over HTTP instead.
 
 ## 4. Request flows
 
-### 4.1 Every request starts at the gateway
+### 4.1 Every request starts at the web tier
 
 ```mermaid
 sequenceDiagram
     participant B as Browser
-    participant G as gateway (nginx)
-    participant A as app container
+    participant G as web (nginx)
+    participant A as static files
     participant S as service
 
     alt By path (works with no setup)
@@ -200,14 +211,14 @@ sequenceDiagram
     G->>A: GET /            (prefix stripped either way)
     A-->>B: index.html
     B->>G: GET ./app.js
-    Note over B,A: Apps use RELATIVE asset paths, so the same file<br/>works behind /driver/, on the hostname, and on :3002.
+    Note over B,A: Apps use RELATIVE asset paths, so the same file<br/>works behind /driver/ and on its own hostname.
 
     B->>G: GET /api/dispatch/v1/runsheets?driver_id=DRV-4417
     G->>S: GET /api/v1/runsheets?driver_id=DRV-4417
     S-->>B: 200 JSON
 ```
 
-Every `server` block in the gateway includes the same `api_locations.conf`, so `/api/*` resolves
+Every `server` block in `apps/web/nginx.conf` includes the same `api_locations.conf`, so `/api/*` resolves
 same-origin **from whichever hostname you used**. That is what keeps **CORS out of this project
 entirely** — the most common source of frontend/backend friction, designed out rather than
 configured around.
@@ -441,8 +452,8 @@ but the backend enforces it regardless. UI restrictions are a courtesy; the 409 
 
 | Failure | Effect | Why |
 |---|---|---|
-| **An app container down** | That app 502s through the gateway. The other four unaffected | Five independent static containers |
-| **Gateway down** | All hostnames and paths dead; **direct ports 3001–3005 still work** | Single entry point is a single point of failure — the direct ports are the escape hatch |
+| **web container down** | Everything unreachable on :80. Backends still up on 127.0.0.1:8001/8002 | Single entry point is a single point of failure |
+
 | **Redis down** | Tracking works, slower. GPS endpoints 503 | Two roles, two policies — §6.2 |
 | **consignment down** | Booking, tracking, scans fail. Admin console's parcel list and picker fail. Driver can still record POD → 207 | It is the system of record |
 | **dispatch down** | Merchant, hub and customer apps unaffected. Driver app and admin runsheet tab dead | Nothing depends on dispatch |
@@ -514,15 +525,15 @@ The application code never changes between environments — only configuration.
 | Postgres | container | container | **RDS** | RDS or in-cluster |
 | Redis | container | pod | container | pod |
 | Images | built locally | loaded into minikube | **ECR** | ECR |
-| Routing | gateway nginx | **Ingress** | gateway nginx | **ALB Ingress** |
+| Routing | web nginx | **Ingress** | web nginx | **ALB Ingress** |
 | App hostnames | hosts file | `/etc/hosts` + `minikube ip` | hosts file or DNS | **Route 53** |
 | Service discovery | Compose DNS | K8s DNS | Compose DNS | K8s DNS |
 | Config | `.env` | ConfigMap + Secret | `.env` | ConfigMap + Secret |
 
-The gateway is deliberately Ingress-shaped — **host- and path-based routing to several backends from
+The web tier's nginx is deliberately Ingress-shaped — **host- and path-based routing to several backends from
 one entry point** — which is exactly the Ingress resource model. Each `server { server_name … }`
 block becomes an Ingress `rule.host`; each `location /x/` becomes a `path`. Moving to Kubernetes is
-a translation of `apps/gateway/nginx.conf`, not a redesign. See
+a translation of `apps/web/nginx.conf`, not a redesign. See
 [FleetPulse-Kubernetes.md](FleetPulse-Kubernetes.md).
 
 ---

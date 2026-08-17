@@ -1,0 +1,86 @@
+# A StatefulSet, not a Deployment: this pod has durable identity (postgres-0)
+# and a volume that must survive a restart. Compare with 04-redis.yaml, which
+# is correctly a Deployment because it needs neither.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: fleetpulse
+spec:
+  clusterIP: None          # headless: gives the pod a stable DNS name
+  selector: { app: postgres }
+  ports:
+    - port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: fleetpulse
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              value: fleetadmin
+            - name: POSTGRES_DB
+              value: fleetpulse
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: fleetpulse-secrets, key: POSTGRES_PASSWORD }
+            # The image only runs /docker-entrypoint-initdb.d against an EMPTY
+            # data directory. Mounting a subdirectory keeps lost+found out of
+            # PGDATA on volume types that create one.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+          # No livenessProbe on purpose. pg_isready as a liveness check would
+          # restart the pod during a long recovery, which is when restarting is
+          # the worst possible move. Readiness alone is correct here.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "fleetadmin", "-d", "fleetpulse"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { memory: "192Mi", cpu: "100m" }
+            limits:   { memory: "512Mi" }
+      volumes:
+        # Created by:
+        #   kubectl create configmap db-init-sql -n fleetpulse --from-file=db/init.sql
+        - name: init
+          configMap: { name: db-init-sql }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 2Gi }
+# /!\ The same trap as Compose, with a worse cleanup. init.sql runs ONLY
+#     against an empty data directory, and so does POSTGRES_PASSWORD. Editing
+#     either after the first start changes nothing. In Compose the fix is
+#     `docker compose down -v`; here it is BOTH of these:
+#
+#       kubectl delete statefulset postgres -n fleetpulse
+#       kubectl delete pvc data-postgres-0 -n fleetpulse   # <- the part people forget
+#
+#     Deleting the StatefulSet does NOT delete the PVC. Recreate without the
+#     second command and Postgres returns with the old schema and old password.
+#     To rotate on a LIVE database, use ALTER USER instead -- same as Compose.
+#     On EKS that PVC is a real EBS volume that keeps billing after teardown.

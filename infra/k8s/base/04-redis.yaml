@@ -1,0 +1,53 @@
+# A Deployment, not a StatefulSet: nothing here needs stable identity or
+# durable storage -- no volumeClaimTemplates, no ordinal names.
+#
+# But be honest about what a restart costs. The two services use this Redis
+# differently (see docs/FleetPulse-Architecture.md):
+#
+#   consignment app/cache.py -- CACHE. Postgres is the truth. Repopulates.
+#   dispatch    app/cache.py -- STORE. Nothing else holds GPS. Positions are GONE.
+#
+# So a restart is not free: it drops every in-flight driver position. That is
+# acceptable because the data is stale in 10 seconds anyway and there is no
+# gps_pings table by design -- not because the loss is imaginary.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: fleetpulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: redis }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # Same bound Compose sets. The pod's 96Mi limit sits ABOVE maxmemory
+          # so Redis evicts by LRU before the kernel OOM-kills the container.
+          args: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+          ports:
+            - containerPort: 6379
+          resources:
+            # requests = what the scheduler reserves for this pod
+            # limits   = the hard ceiling before the pod is killed
+            requests: { memory: "32Mi", cpu: "10m" }
+            limits:   { memory: "96Mi" }
+          livenessProbe:
+            tcpSocket: { port: 6379 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: fleetpulse
+spec:
+  selector: { app: redis }
+  ports:
+    - port: 6379
+      targetPort: 6379

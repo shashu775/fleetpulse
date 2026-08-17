@@ -24,7 +24,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdevpassword}
       POSTGRES_DB: ${POSTGRES_DB:-fleetpulse}
     ports:
-      - "5432:5432"          # so you can connect with pgAdmin / DBeaver / psql
+      # 127.0.0.1 = loopback ONLY. Without this prefix Docker binds 0.0.0.0 and
+      # the database is reachable by anyone on your LAN, with the credentials
+      # that are committed in .env.example.
+      - "127.0.0.1:5432:5432"
     volumes:
       # Scripts here run automatically on FIRST start only. If you edit
       # init.sql you must `docker compose down -v` to see the change.
@@ -47,7 +50,7 @@ services:
     # of growing until the kernel OOM-kills something.
     command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"   # Redis has NO password -- never expose it
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -66,7 +69,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
-      - "8001:8000"          # host 8001 -> container 8000
+      - "127.0.0.1:8001:8000"   # Swagger + debug only; gateway is the real door
     depends_on:
       # service_healthy, not service_started: the app never boots against a
       # half-ready database.
@@ -95,7 +98,7 @@ services:
       CONSIGNMENT_URL: http://consignment-service:8000
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
-      - "8002:8000"
+      - "127.0.0.1:8002:8000"
     depends_on:
       postgres:            { condition: service_healthy }
       redis:               { condition: service_healthy }
@@ -106,73 +109,29 @@ services:
     restart: unless-stopped
 
   # ==========================================================
-  # WEB APPS
+  # WEB TIER -- all five apps + the API proxy in ONE container.
   #
-  # Four static apps behind one gateway. Every app image is built from the
-  # REPO ROOT (context: .) so it can copy packages/web-shared alongside its
-  # own files -- that is the shared API client and design system.
+  # This replaced six containers (a gateway plus one nginx per app). Static
+  # assets have no independent scaling profile, no state and no independent
+  # lifecycle, and since every app embeds packages/web-shared, a change there
+  # rebuilt all five images anyway.
   #
-  # Each app also publishes its own port for direct access while developing,
-  # but the gateway on :80 is the real entry point.
+  # Built from the REPO ROOT so the image can copy apps/ AND packages/.
+  # Serves:
+  #   /  /merchant/  /hub/  /driver/  /track/  /admin/     (static, no proxy)
+  #   /api/consignment/*  /api/dispatch/*                  (proxied)
+  #   plus a vhost per app hostname -- see apps/web/nginx.conf
   # ==========================================================
-
-  gateway:
+  web:
     build:
-      context: .
-      dockerfile: apps/gateway/Dockerfile
-    container_name: fp-gateway
+      context: .                       # repo root: needs apps/ AND packages/
+      dockerfile: apps/web/Dockerfile
+    container_name: fp-web
     ports:
-      - "80:80"                # <-- http://localhost
+      - "80:80"                        # <-- http://localhost  (the only public port)
     depends_on:
       consignment-service: { condition: service_started }
       dispatch-service:    { condition: service_started }
-      merchant-portal:     { condition: service_started }
-      driver-app:          { condition: service_started }
-      hub-app:             { condition: service_started }
-      customer-portal:     { condition: service_started }
-      admin-console:       { condition: service_started }
-    restart: unless-stopped
-
-  # Operations console: network-wide view, and the only place a runsheet can
-  # be created without the simulator or a raw API call.
-  admin-console:
-    build:
-      context: .
-      dockerfile: apps/admin-console/Dockerfile
-    container_name: fp-admin
-    ports: ["3005:80"]
-    restart: unless-stopped
-
-  merchant-portal:
-    build:
-      context: .
-      dockerfile: apps/merchant-portal/Dockerfile
-    container_name: fp-merchant
-    ports: ["3001:80"]
-    restart: unless-stopped
-
-  driver-app:
-    build:
-      context: .
-      dockerfile: apps/driver-app/Dockerfile
-    container_name: fp-driver
-    ports: ["3002:80"]
-    restart: unless-stopped
-
-  hub-app:
-    build:
-      context: .
-      dockerfile: apps/hub-app/Dockerfile
-    container_name: fp-hub
-    ports: ["3003:80"]
-    restart: unless-stopped
-
-  customer-portal:
-    build:
-      context: .
-      dockerfile: apps/customer-portal/Dockerfile
-    container_name: fp-customer
-    ports: ["3004:80"]
     restart: unless-stopped
 
   # ==========================================================

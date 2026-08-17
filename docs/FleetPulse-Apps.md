@@ -1,6 +1,6 @@
 # FleetPulse App Ecosystem
 
-Four front-end applications over two shared backend microservices, mirroring the Delhivery
+Five front-end applications over two shared backend microservices, mirroring the Delhivery
 multi-app model: merchants book, hubs sort, drivers deliver, customers track.
 
 Companion to [FleetPulse-Architecture.md](FleetPulse-Architecture.md) (how the backend works) and
@@ -36,21 +36,23 @@ and manual DOM updates. At this scale that is cheap.
 
 ## 1. The five apps
 
-| App | Users | Path *(works now)* | Hostname *(needs §1.2)* | Port | Status |
-|---|---|---|---|---|---|
-| **Launcher** | — | `/` | `fleetpulse.localhost` | 80 | App switcher |
-| **Merchant Portal** | Sellers, brands | `/merchant/` | `merchant.fleetpulse.localhost` | 3001 | Booking works; bulk/labels/pickups pending |
-| **Hub Scanner** | Facility operators | `/hub/` | `hub.fleetpulse.localhost` | 3003 | Scanning works; bags/manifests pending |
-| **Driver App** | Field executives | `/driver/` | `driver.fleetpulse.localhost` | 3002 | **Complete** |
-| **Customer Portal** | Recipients | `/track/` | `track.fleetpulse.localhost` | 3004 | **Complete** |
-| **Admin Console** | Operations | `/admin/` | `admin.fleetpulse.localhost` | 3005 | **Complete** |
+| App | Users | Path *(works now)* | Hostname *(needs §1.2)* | Status |
+|---|---|---|---|---|
+| **Launcher** | — | `/` | `fleetpulse.localhost` | App switcher |
+| **Merchant Portal** | Sellers, brands | `/merchant/` | `merchant.fleetpulse.localhost` | Booking works; bulk/labels/pickups pending |
+| **Hub Scanner** | Facility operators | `/hub/` | `hub.fleetpulse.localhost` | Scanning works; bags/manifests pending |
+| **Driver App** | Field executives | `/driver/` | `driver.fleetpulse.localhost` | **Complete** |
+| **Customer Portal** | Recipients | `/track/` | `track.fleetpulse.localhost` | **Complete** |
+| **Admin Console** | Operations | `/admin/` | `admin.fleetpulse.localhost` | **Complete** |
 
-### Three ways to reach every app
+> **All five apps now ship in one container**, `web`. They were previously five separate nginx
+> containers behind a sixth gateway container — **the per-app ports 3001–3005 no longer exist.**
+> See [FleetPulse-Architecture-Review.md](FleetPulse-Architecture-Review.md) §2 for the reasoning.
+
+### Two ways to reach every app
 
 1. **Path under localhost** — `http://localhost/driver/` · **zero setup, always works. Start here.**
-2. **Direct port** — `http://localhost:3002/` · bypasses the gateway, so it isolates whether a
-   problem is in the app or in the routing
-3. **Own hostname** — `http://driver.fleetpulse.localhost/` · production-shaped, but the name must
+2. **Own hostname** — `http://driver.fleetpulse.localhost/` · production-shaped, but the name must
    resolve first (§1.2)
 
 > ### ⚠️ `.localhost`, not `.local`
@@ -63,29 +65,35 @@ and manual DOM updates. At this scale that is cheap.
 > **internally, without consulting the OS resolver** — so in a browser these often work with no
 > setup at all. Command-line tools like `curl` still go through the OS and need §1.2.
 >
-> The gateway accepts **both** spellings, so old links keep working.
+> `apps/web/nginx.conf` accepts **both** spellings, so old links keep working.
 
 ```
-   merchant.fleetpulse.local ─┐
-   hub.fleetpulse.local ──────┤
-   driver.fleetpulse.local ───┼──►  gateway (nginx) :80  ──┬──► merchant-portal  :3001
-   track.fleetpulse.local ────┤     host- AND path-based   ├──► hub-app          :3003
-   admin.fleetpulse.local ────┤     routing                ├──► driver-app       :3002
-   localhost/<app>/ ──────────┘                            ├──► customer-portal  :3004
-                                                           ├──► admin-console    :3005
-                                                           ├──► consignment-service
-                                                           └──► dispatch-service
+   merchant.fleetpulse.localhost ─┐
+   hub.fleetpulse.localhost ──────┤        ┌──────────────────────────────┐
+   driver.fleetpulse.localhost ───┼───────►│  web (nginx) :80             │
+   track.fleetpulse.localhost ────┤        │  host- AND path-based        │
+   admin.fleetpulse.localhost ────┤        │                              │
+   localhost/<app>/ ──────────────┘        │  /merchant/ /hub/ /driver/   │
+                                           │  /track/ /admin/  ← STATIC,  │
+                                           │     served from this image   │
+                                           └──────┬────────────┬──────────┘
+                                    /api/consignment/*   /api/dispatch/*
+                                                  ▼            ▼
+                                    consignment-service   dispatch-service
 ```
 
-### 1.1 Why a gateway rather than five separate ports
+Only `/api/*` is proxied. The five apps are files inside the `web` image, so a path route is a
+direct file lookup rather than a hop to another container.
 
-Every server block in the gateway includes `api_locations.conf`, so `/api/*` is same-origin from
+### 1.1 Why one web container rather than five
+
+Every server block in `apps/web/nginx.conf` includes `api_locations.conf`, so `/api/*` is same-origin from
 *whichever* hostname you use. That means **no CORS anywhere in this project** — the single most
 common source of frontend/backend friction, designed out rather than configured around.
 
 It is also deliberately the same shape as a Kubernetes **Ingress**: host- and path-based routing to
 several backends from one entry point. Moving to k8s later is a translation of
-`apps/gateway/nginx.conf`, not a redesign.
+`apps/web/nginx.conf`, not a redesign.
 
 ### 1.2 Enabling the hostnames
 
@@ -143,20 +151,22 @@ is a good sign the API surface was right.
 
 ```
 fleetpulse/
-├── docker-compose.yml              9 containers, one command
+├── docker-compose.yml              5 containers, one command
 │
 ├── apps/                           ── FRONTEND ──────────────────────
-│   ├── gateway/                    launcher + reverse proxy (:80)
-│   │   ├── index.html              app switcher
-│   │   ├── nginx.conf              host + path routing
+│   ├── web/                        THE ONLY front-end container (:80)
+│   │   ├── index.html              launcher
+│   │   ├── nginx.conf              host + path routing, static serving
 │   │   ├── api_locations.conf      /api/* — included by EVERY server block
 │   │   ├── app_proxy.conf          shared proxy headers
-│   │   └── Dockerfile
-│   ├── merchant-portal/            :3001  index.html · nginx.conf · Dockerfile
-│   ├── driver-app/                 :3002  index.html · app.js · app.css · …
-│   ├── hub-app/                    :3003
-│   ├── customer-portal/            :3004  index.html · app.js · app.css · …
-│   └── admin-console/              :3005  index.html · app.js · app.css · …
+│   │   └── Dockerfile              bundles all five apps below
+│   │
+│   │   ── sources; no Dockerfile or nginx.conf of their own ──
+│   ├── merchant-portal/            index.html
+│   ├── hub-app/                    index.html
+│   ├── driver-app/                 index.html · app.js · app.css
+│   ├── customer-portal/            index.html · app.js · app.css
+│   └── admin-console/              index.html · app.js · app.css
 │
 ├── packages/                       ── SHARED ────────────────────────
 │   └── web-shared/
@@ -175,12 +185,12 @@ fleetpulse/
 
 ### How sharing works
 
-Each app image is built **from the repo root** so it can copy the shared package:
+The single `web` image is built **from the repo root** so it can copy the shared package:
 
 ```yaml
 build:
   context: .                              # repo root, not the app folder
-  dockerfile: apps/driver-app/Dockerfile
+  dockerfile: apps/web/Dockerfile
 ```
 
 ```dockerfile
@@ -189,8 +199,8 @@ COPY apps/driver-app/     /usr/share/nginx/html/   # app wins on collision
 ```
 
 Copied at **build time**, not fetched at runtime — so no app depends on another being up. The cost
-is that changing `packages/web-shared` requires rebuilding every app image; at ~8 seconds each that
-is the right trade.
+is that changing `packages/web-shared` requires rebuilding the `web` image — one build, not five.
+
 
 ---
 
@@ -325,10 +335,10 @@ docker compose ps
 | | |
 |---|---|
 | **Launcher** | **http://localhost** |
-| Merchant Portal | http://localhost/merchant/ · :3001 |
-| Hub Scanner | http://localhost/hub/ · :3003 |
-| Driver App | http://localhost/driver/ · :3002 |
-| Customer Tracking | http://localhost/track/ · :3004 |
+| Merchant Portal | http://localhost/merchant/ |
+| Hub Scanner | http://localhost/hub/ |
+| Driver App | http://localhost/driver/ |
+| Customer Tracking | http://localhost/track/ |
 | Consignment API docs | http://localhost:8001/docs |
 | Dispatch API docs | http://localhost:8002/docs |
 
@@ -354,11 +364,11 @@ That is the entire parcel lifecycle, clickable, no terminal.
 
 ## 7. Notable implementation details
 
-**Relative asset paths everywhere.** Apps are served both at `/driver/` (through the gateway) and
-at `/` (direct on :3002). `<link href="./base.css">` works in both; `/base.css` would break behind
+**Relative asset paths everywhere.** Apps are served both at `/driver/` (path routing) and
+at `/` (own hostname). `<link href="./base.css">` works in both; `/base.css` would break behind
 the prefix.
 
-**`resolver 127.0.0.11` in the gateway.** Docker's embedded DNS. Without it nginx resolves upstream
+**`resolver 127.0.0.11` in the web container.** Docker's embedded DNS. Without it nginx resolves upstream
 service names once at boot and keeps a stale IP after any container restart.
 
 **The signature pad scales for device pixel ratio.** Without matching the canvas backing store to

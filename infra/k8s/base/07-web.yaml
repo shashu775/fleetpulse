@@ -1,0 +1,75 @@
+# All five front-end apps AND the /api/* proxy, in one image.
+#
+# Build from the REPO ROOT -- the image needs both apps/ and packages/:
+#   docker build -f apps/web/Dockerfile -t fleetpulse/web:latest .
+#
+# Stateless, so it is the easiest workload in the cluster. It is also the only
+# one that needs an image rebuild to reflect a source change: there is no
+# --reload equivalent for static files.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: fleetpulse
+  labels: { app: web }
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      containers:
+        - name: web
+          image: fleetpulse/web:latest
+          imagePullPolicy: IfNotPresent    # see the note in 05-consignment.yaml
+          ports:
+            - containerPort: 80
+              name: http
+          resources:
+            requests: { memory: "24Mi", cpu: "10m" }
+            limits:   { memory: "96Mi" }
+          # /healthz is served by nginx itself (apps/web/api_locations.conf) and
+          # touches no backend -- exactly what a liveness probe should be.
+          #
+          # httpGet probes are sent to the POD IP, not to localhost, so they
+          # sidestep the nginx:alpine trap where `localhost` resolves to ::1
+          # while `listen 80` binds IPv4 only. Docker's HEALTHCHECK (which uses
+          # 127.0.0.1 for that reason) is ignored by Kubernetes entirely. If you
+          # ever convert this to exec: ["wget", ...], keep 127.0.0.1 or every
+          # web pod reports unready while serving perfectly.
+          readinessProbe:
+            httpGet: { path: /healthz, port: 80 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 80 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: fleetpulse
+spec:
+  type: ClusterIP
+  selector: { app: web }
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http
+# /!\ nginx resolves its upstreams ONCE, at startup. proxy_pass with a literal
+#     hostname and no `resolver` directive is resolved when the config loads and
+#     cached for the life of the process. A Service's ClusterIP is stable, so
+#     this is fine day to day -- but delete and recreate the consignment-service
+#     Service (a helm uninstall/install cycle does exactly that) and it gets a
+#     NEW ClusterIP while the running web pods keep proxying to the old one.
+#
+#     Symptom: static pages load fine, every /api/* call times out, and the
+#     backend pods look perfectly healthy.
+#     Fix:     kubectl rollout restart deploy/web -n fleetpulse

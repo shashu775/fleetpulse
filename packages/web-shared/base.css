@@ -7,6 +7,15 @@
  * CSS toolchain per app would be four more things to install and break.
  */
 
+/* ui.js show() toggles the `hidden` ATTRIBUTE, which only hides via the user
+ * agent's `[hidden] { display: none }`. Any author rule that sets `display` on
+ * the same element beats it -- author styles outrank the UA sheet -- so
+ * .modal-backdrop's `display: grid` below silently made `hidden` a no-op and
+ * left the POD modal on screen permanently. !important because the whole job
+ * of this rule is to outrank the component's own display. Keep it FIRST so it
+ * covers every component declared after it. */
+[hidden] { display: none !important; }
+
 :root {
   --bg:        #f6f7f9;
   --surface:   #ffffff;

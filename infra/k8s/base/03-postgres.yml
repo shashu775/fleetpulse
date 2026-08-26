@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:  
+       namespace: fleetpulse
+       name: postgres
+spec:
+      serviceName: postgres
+      replicas: 1
+      selector: 
+         matchLabels: {app: postgres}
+      template: 
+         metadata: 
+             labels: {app: postgres}
+         spec:
+             containers:
+             - name: postgres
+               image: postgres:16-alpine
+               ports: 
+               - containerPort: 5432
+               resources:
+                  requests: {memory: "192Mi", cpu: "100m"}
+                  limits:   {memory: "512Mi", cpu : "250m"}
+               livenessProbe:
+                  exec:
+                     command: ["pg_isready", "-U", "fleetpulse", "-d", "fleetpulse"]
+                  initialDelaySeconds: 5
+                  periodSeconds: 5
+               env:
+                - name: POSTGRES_USER
+                  value: fleetpulse
+                - name: POSTGRES_DB
+                  value: fleetpulse
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                     secretKeyRef: {name: fleetpulse-secrets, key: POSTGRES_PASSWORD}
+                - name : PGDATA
+                  value : /var/lib/postgresql/data/pgdata
+               volumeMounts:
+                - name: data
+                  mountPath: /var/lib/postgresql/data
+                - name: init
+                  mountPath: /docker-entrypoint-initdb.d
+             volumes:
+              - name: init
+                configMap:
+                  name: postgres-init-scripts
+      volumeClaimTemplates:
+            - metadata:
+                name: data
+              spec:
+                accessModes: [ "ReadWriteOnce" ]
+                resources:
+                  requests:
+                    storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+    namespace: fleetpulse
+    name: postgres-service
+spec:
+    selector: {app: postgres}
+    clusterIP: None
+    ports:
+        - port: 5432
+          targetPort: 5432

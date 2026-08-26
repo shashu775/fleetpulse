@@ -44,9 +44,19 @@ async function loadDrivers() {
   try {
     const { drivers } = await dispatch.drivers();
     show($("#no-drivers"), drivers.length === 0);
-    host.innerHTML = drivers
-      .map(
-        (d) => `
+
+    // Grouped by hub: the roster is 18 drivers across 6 hubs, and a flat list
+    // of 18 names makes a driver hunt for their own. The API already returns
+    // them ordered by hub_id, so a single pass builds the groups.
+    const byHub = new Map();
+    for (const d of drivers) {
+      if (!byHub.has(d.hub_id)) byHub.set(d.hub_id, []);
+      byHub.get(d.hub_id).push(d);
+    }
+
+    host.innerHTML = [...byHub.entries()].map(([hub, list]) => `
+      <div class="section-label">${esc(hub)}</div>
+      ${list.map((d) => `
         <button class="driver-btn" data-id="${esc(d.driver_id)}"
                 data-name="${esc(d.driver_name)}" data-vehicle="${esc(d.vehicle_id)}">
           <span>
@@ -54,9 +64,8 @@ async function loadDrivers() {
             <div class="meta">${esc(d.driver_id)} · ${esc(d.vehicle_id)}</div>
           </span>
           <span class="badge">${d.runsheets} runsheet${d.runsheets === 1 ? "" : "s"}</span>
-        </button>`
-      )
-      .join("");
+        </button>`).join("")}
+    `).join("");
 
     host.querySelectorAll(".driver-btn").forEach((b) =>
       b.addEventListener("click", () =>

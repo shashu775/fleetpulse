@@ -86,7 +86,11 @@ export const consignment = {
 // Fleet & Dispatch Service -- runsheets, GPS, delivery
 // ---------------------------------------------------------------------------
 export const dispatch = {
-  drivers: () => get(`${API.dispatch}/drivers`),
+  // { hub_id, status } -- both optional. status defaults to ACTIVE server-side;
+  // pass status: "ALL" to include drivers who have left. Not "" -- qs() below
+  // strips empty values, so a blank never reaches the server.
+  drivers: (params = {}) => get(`${API.dispatch}/drivers${qs(params)}`),
+  hubs: () => get(`${API.dispatch}/hubs`),
   runsheets: (params = {}) => get(`${API.dispatch}/runsheets${qs(params)}`),
   runsheet: (id) => get(`${API.dispatch}/runsheets/${encodeURIComponent(id)}`),
   createRunsheet: (payload) => post(`${API.dispatch}/runsheets`, payload),

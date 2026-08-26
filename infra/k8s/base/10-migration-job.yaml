@@ -33,10 +33,12 @@ spec:
             - name: sql
               mountPath: /sql
       volumes:
-        # The SAME ConfigMap the StatefulSet mounts, so there is exactly one
-        # copy of the schema in the cluster:
-        #   kubectl create configmap db-init-sql -n fleetpulse --from-file=db/init.sql
+        # The SAME ConfigMap the StatefulSet in 03-postgres.yml mounts, so there
+        # is exactly one copy of the schema in the cluster. Created by hand --
+        # it is NOT part of `kubectl apply -f`, so it disappears every time the
+        # namespace is deleted and must be recreated BEFORE postgres starts:
+        #   kubectl create configmap postgres-init-scripts -n fleetpulse --from-file=db/init.sql
         - name: sql
-          configMap: { name: db-init-sql }
+          configMap: { name: postgres-init-scripts }
 # Because init.sql uses CREATE TABLE IF NOT EXISTS throughout, re-running this
 # Job is safe. Idempotent migrations are a habit worth forming now.

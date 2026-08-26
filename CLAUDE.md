@@ -8,7 +8,9 @@ A working logistics platform modelling Delhivery-style parcel operations: **five
 apps served by one nginx container, two FastAPI microservices, PostgreSQL and Redis** — five
 containers, one `docker compose up`. Built as a DevOps learning project.
 
-Entry point is **http://localhost/**. Everything runs locally; no cloud resources exist yet.
+Entry point is **http://localhost/**. The same stack also runs on Docker Desktop's Kubernetes
+(`infra/k8s/base/`), and Terraform for an EKS cluster exists but **has never been applied** — no
+cloud resources exist. See Infrastructure.
 
 > Previously ten containers (a gateway plus one nginx per app). Consolidated because static assets
 > have no independent scaling profile, no state and no independent lifecycle — and since every app
@@ -28,7 +30,7 @@ docker compose down                   # stop
 docker compose down -v                # stop AND wipe the database
 ```
 
-### Tests — 36 total, no infrastructure needed
+### Tests — 43 total, no infrastructure needed
 
 Both service images have a `test` stage.
 
@@ -37,7 +39,7 @@ docker build --target test -t fp-consignment-test ./services/consignment-service
 docker run --rm fp-consignment-test                      # 15 passed
 
 docker build --target test -t fp-dispatch-test ./services/dispatch-service
-docker run --rm fp-dispatch-test                         # 21 passed
+docker run --rm fp-dispatch-test                         # 28 passed
 
 # A single test or pattern:
 docker run --rm fp-dispatch-test pytest -q -k gps
@@ -69,6 +71,59 @@ docker compose exec postgres psql -U fleetadmin -d fleetpulse -c "\dt dispatch.*
 
 ⚠️ `db/init.sql` runs **only on a fresh volume**. After editing it:
 `docker compose down -v && docker compose up --build -d` — which destroys all parcel data.
+
+Every statement in it is idempotent (`IF NOT EXISTS`, `ON CONFLICT DO NOTHING`), so there is a
+no-data-loss path — prefer this when the change is additive:
+
+```bash
+docker compose exec -T postgres psql -U fleetadmin -d fleetpulse < db/init.sql
+```
+
+Keep it that way: **a new statement in `init.sql` must be safe to re-run**, or this path breaks.
+
+### The driver roster
+
+`dispatch.drivers` seeds 3 drivers per hub, 18 across the 6 hubs, each with one vehicle whose plate
+carries the hub city's state code (`KA…` Bangalore, `WB…` Kolkata). `GET /api/v1/drivers?hub_id=`
+serves it; `GET /api/v1/hubs` groups it by hub.
+
+It exists because the endpoint used to derive its list from `dispatch.runsheets` — so **a driver did
+not exist until someone had already assigned them work**, leaving the driver app's login picker empty
+on a fresh database with no way to create the first runsheet. The runsheet count survives as a
+`LEFT JOIN`, so an unassigned driver appears with `runsheets: 0` rather than not appearing.
+
+`status` defaults to `ACTIVE`; pass `status=ALL` to include leavers. **Not a blank** — the shared
+client's `qs()` strips empty values before they reach the wire.
+
+### Kubernetes (Docker Desktop)
+
+`infra/k8s/base/*.yml` has been applied for real on Docker Desktop's Kubernetes. Images are
+`travel2024/{web,consignment,dispatch}:latest` with `imagePullPolicy: IfNotPresent` — Docker
+Desktop shares the local Docker daemon, so a locally built image is already present.
+
+```powershell
+kubectl create configmap postgres-init-scripts -n fleetpulse --from-file=db/init.sql   # FIRST
+kubectl apply -f infra/k8s/base/
+kubectl get pods -n fleetpulse
+```
+
+The ConfigMap is **hand-made and not part of `kubectl apply -f`** — it vanishes with the namespace
+and must exist *before* Postgres starts, or `postgres-0` sits in `ContainerCreating` forever.
+
+**An Ingress object routes nothing without a controller, and Docker Desktop ships none.**
+`kubectl get ingressclass` returning "No resources found" is the whole diagnosis: pods healthy,
+`kubectl get ingress` looking normal, and nothing listening on `:80`. Use minikube
+(`minikube addons enable ingress`) or port-forward.
+
+### Terraform / EKS
+
+```bash
+cd infra/terraform/environments/dev
+terraform init && terraform plan          # apply takes ~15-20 min
+aws eks update-kubeconfig --name fleetpulse-tf --region us-east-1
+kubectl delete ingress,pvc --all -A       # BEFORE destroy — see below
+terraform destroy
+```
 
 ## URLs
 
@@ -111,9 +166,9 @@ can bypass or race the hosts file and fail intermittently. RFC 6761 reserves `.l
 loopback. `apps/web/nginx.conf` accepts both spellings for backwards compatibility; new work should
 use `.localhost`.
 
-**Kubernetes uses a different hostname on purpose: `fleetpulse.test`.** `docs/FleetPulse-Kubernetes.md`
-sets that as the Ingress host, and unlike `.localhost` it **does** need a hosts entry pointing at
-`minikube ip`. Both `.test` and `.localhost` are RFC 6761 reserved, so neither is wrong — **do not
+**Kubernetes uses a different hostname on purpose: `fleetpulse.test`.** `infra/k8s/base/08-ingress.yml`
+sets it, and unlike `.localhost` it **does** need a hosts entry (`127.0.0.1 fleetpulse.test`, or
+`minikube ip`). Keeping the two different is what tells you which stack you are looking at. Both `.test` and `.localhost` are RFC 6761 reserved, so neither is wrong — **do not
 "reconcile" one to the other.**
 
 ### ⚠️ Port binding is a security control here
@@ -232,6 +287,10 @@ Then add it to the launcher (`apps/web/index.html`) and the Admin console's Apps
   `html.escape()` — keep it that way when adding fields.
 - **No FK crosses a schema boundary.** `runsheet_items.awb` and `delivery_attempts.awb` reference
   `consignment.waybills` by value; a real FK would block a future service split.
+- **`runsheets` copies the driver's name and vehicle instead of joining `dispatch.drivers`.** Not
+  a normalisation slip — a runsheet is a historical record of who drove what that day, so it must
+  still read correctly after the driver changes vehicle or leaves. For the same reason drivers are
+  marked `INACTIVE`, never deleted.
 - **`scan_events` is append-only.** `waybills.current_status` is a denormalised convenience column
   rebuildable from it.
 - **Partial failure is reported, not hidden.** `POST /runsheets` returns `assigned[]` *and*
@@ -249,6 +308,76 @@ Then add it to the launcher (`apps/web/index.html`) and the Admin console's Apps
   captures real evidence; `PHOTO` is accepted by the API and has **no UI**. Free-text
   `pod_receiver` is correct and not a bug — parcels legitimately go to neighbours and reception.
   The design is `docs/FleetPulse-Addon-OTP.md`.
+
+## Infrastructure
+
+Three deployment targets exist, at three different maturities: **Compose (works), Kubernetes on
+Docker Desktop (applied and debugged), EKS via Terraform + GitHub Actions (written, cost-guarded).**
+
+### The k8s manifests are `.yml`, and the `.yaml` ones are dead
+
+`infra/k8s/base/*.yml` is the live set. The `.yaml` files of the same numbers are **staged
+deletions** (git shows `D 00-namespace.yaml` … `D 09-hpa.yaml`) and `infra/k8s/base_bkp/` is a copy
+of the old set. Do not edit either — and do not "restore" the deletions. Two exceptions still carry
+the `.yaml` extension because they were never renamed: `10-migration-job.yaml`, plus an **empty
+`11-ingress-r.yml`** (0 bytes, a placeholder).
+
+### Kubernetes and Compose deliberately disagree on the Postgres user
+
+| | Compose | Kubernetes |
+|---|---|---|
+| `POSTGRES_USER` | `fleetadmin` (`.env`) | `fleetpulse` (`02-secrets.yml`) |
+| Ingress host | `*.fleetpulse.localhost` | `fleetpulse.test` (needs a hosts entry) |
+
+Both are internally consistent; **do not reconcile them.** A `psql -U` or `pg_isready -U` copied
+from one into the other fails with `role does not exist`, and because `init.sql` runs only on an
+empty data directory, the fix is deleting `pvc/data-postgres-0` — not editing the manifest.
+
+`01-configmap.yml` keys become env vars **verbatim and case-sensitively**. A misspelled `REDIS_URL`
+or `CONSIGNMENT_URL` makes the app fall back to a built-in default silently rather than crash.
+
+### Terraform: the cost guards are the design
+
+`infra/terraform/environments/dev/` builds an EKS cluster (`fleetpulse-tf`) sized so the **only**
+recurring charge is the control plane — ~$0.15/hr, ~$107/month if left up. That holds only because
+several module defaults are turned **off**, each marked `COST GUARD` in `main.tf`:
+`enable_nat_gateway = false` (~$33/mo), `create_kms_key = false`, `cluster_enabled_log_types = []`
+(~$15–45/mo). Public subnets only, because without NAT a private subnet is unroutable and nodes
+never join. **Do not remove a cost guard without knowing its price.**
+
+Two consequences worth knowing before debugging them cold:
+
+- **`enable_ebs_csi` defaults to `false`**, so there is no default StorageClass, so the Postgres PVC
+  stays `Pending` forever and both services fail readiness behind it. Deliberate — Docker Desktop
+  hides this with a built-in hostpath provisioner; EKS ships none. Set it `true` (~$0.16/mo) to make
+  Postgres work. The `storage_warning` output says which mode you are in.
+- **`node_instance_type` must not be `t3.micro`.** The VPC CNI gives every pod a real VPC IP from
+  the node's ENIs, so max-pods is a *networking* limit: t3.micro = 4 pods, and kube-system alone
+  needs ~4.
+
+State is in S3 (`versions.tf`), created by hand on purpose — **Terraform must never be able to
+delete the record of what it has to delete.** `.terraform.lock.hcl` is deliberately **not**
+gitignored; it pins provider checksums so CI and a laptop resolve the same versions.
+
+### CI: the plan is the review artifact
+
+`.github/workflows/terraform.yml` — PRs touching `infra/terraform/**` get their plan posted as a
+single updated PR comment; a push to `code2` applies **the saved plan artifact**, never a freshly
+computed one. Auth is GitHub OIDC → an IAM role in repo variable `AWS_ROLE_ARN`; no long-lived AWS
+keys. A `Cost guard` step greps the plan text for `aws_nat_gateway|aws_kms_key|aws_cloudwatch_log_group|aws_eip|aws_lb`
+and fails the build — a module upgrade that flips a default back on breaks CI instead of the budget.
+
+⚠️ **`code2` is both the working branch and the deploy branch**, so a push changes AWS with no gate.
+The apply job already targets a GitHub Environment named `dev`; creating that Environment with a
+required reviewer is what turns it into an approval gate.
+
+`.github/workflows/terraform-destroy.yml` is manual-only and requires typing `destroy`. It deletes
+Ingresses and PVCs **before** `terraform destroy`, because those create real ALBs and EBS volumes
+that are **not in Terraform state** — destroy the cluster with them present and they orphan, billing
+quietly forever. It then re-lists clusters, load balancers and available volumes to verify.
+
+One-time setup (S3 bucket, OIDC provider, `AWS_ROLE_ARN`) is documented in the workflow header and
+**has not necessarily been done** — check before assuming a run will succeed.
 
 ## Gotchas that have already cost time
 
@@ -309,23 +438,20 @@ line-continuation is a parse error. Prefer the Edit tool or regenerate the block
 
 ## Git
 
-Branch **`code2`**, remote `https://github.com/shashu775/fleetpulse.git`, three commits.
+Branch **`code2`**, remote `https://github.com/shashu775/fleetpulse.git`, five commits
+(`b0a2f26 terraform` is HEAD). `origin/HEAD` points at `master`, but **`code2` is the branch that
+matters** — it is what the CI workflows deploy from. Local branches `code`, `code1`, `master` are
+stale.
 
-`7e2c796 "10 containes"` committed the **ten-container** layout. **The consolidation to five is
-uncommitted on top of it**, so `git status` shows a large pending change:
+The container consolidation and Terraform are now committed. What remains uncommitted is the
+Kubernetes and CI work:
 
-- `?? apps/web/` — the new single web container
-- `D apps/gateway/*` and `D apps/*/Dockerfile`, `D apps/*/nginx.conf` — the six replaced containers
-- `M docker-compose.yml`, `M CLAUDE.md`, `M README.md`, `M docs/FleetPulse-{Apps,Architecture}.md`
-- `?? docs/FleetPulse-Architecture-Review.md`
-
-Later work sits on top of that, unrelated to the consolidation:
-
-- `?? infra/` — **one untracked directory holding two unrelated things**: the `helm create`
-  scaffold *and* the 11 unvalidated k8s manifests (see Not built). `git add infra/` takes both.
-- `M packages/web-shared/base.css` — the `[hidden]` cascade fix (see Gotchas). Affects all five apps.
-- `M apps/driver-app/app.js` — POD modal close on driver switch, plus a `state.runsheet` null guard
-- `M docs/FleetPulse-Kubernetes.md`, `?? docs/FleetPulse-Addon-OTP.md`
+- `?? .github/` — both Terraform workflows, **untracked**. They cannot have run yet.
+- `?? docs/k8s-lessons/` — the five debugging write-ups
+- `D infra/k8s/base/*.yaml` + `?? infra/k8s/base/*.yml` — the extension rename, staged as
+  delete-plus-add rather than as a rename. `?? infra/k8s/base_bkp/` is the old copy.
+- `M .gitignore` — un-ignores `.terraform.lock.hcl` (see Infrastructure)
+- `M infra/terraform/environments/dev/{outputs,versions}.tf`, `?? .terraform.lock.hcl`
 
 Do not "restore" those deletions — they are intentional. Commit only when asked.
 
@@ -348,10 +474,17 @@ PowerShell `&&` and `||` are parser errors, and `eval $(minikube docker-env)` mu
 | `FleetPulse-Apps.md` | Front-end structure, full API surface, routing |
 | `FleetPulse-Architecture-Review.md` | Why 10 containers became 5; the merge-vs-split analysis |
 | `FleetPulse-Simple.md` | The original two-service build plan (Milestones 1–2 done) |
-| `FleetPulse-Kubernetes.md` | Next: minikube + EKS |
+| `FleetPulse-Kubernetes.md` | The k8s + EKS plan `infra/k8s/` and `infra/terraform/` were built from |
 | `FleetPulse-Addon-Observability.md` | Optional: metrics, dashboards, tracing |
 | `FleetPulse-Addon-Notification.md` | Optional: 3rd service via transactional outbox |
 | `FleetPulse-Addon-OTP.md` | Optional: verified delivery codes. **Build Notification first** |
+
+`docs/k8s-lessons/` is a separate, higher-value set: five write-ups of failures that actually
+happened bringing `infra/k8s/base/` up. **Read `docs/k8s-lessons/README.md` before debugging a pod**
+— it maps the `kubectl get pods` STATUS column to the page that explains it. Its thesis:
+*Kubernetes connects things by name and nothing checks that the names match* — seven of nine
+problems in one session were a name in file A not matching a name in file B, and none was an
+architecture problem.
 
 `FleetPulse-Blueprint.md` and `FleetPulse-Zero-Cost.md` are **superseded** (4 services, RabbitMQ,
 K3s); `FleetPulse-EventBridge.md` is off-path; `FleetPulse-Cost-Model.md` is production-scale
@@ -359,25 +492,25 @@ pricing reference. Do not reconcile the superseded documents with the code.
 
 ## Not built
 
-- **Milestone 3–4** of `FleetPulse-Simple.md`: Terraform (VPC, EC2, RDS, ECR) and GitHub Actions.
-  `infra/terraform/{modules,environments/dev}` and `.github/workflows/` are **empty directory
-  skeletons** — zero files. Git does not track empty directories, so they will not appear in a
-  fresh clone. Do not infer a Terraform or CI setup from their presence. Two more empty strays sit
-  at the repo root: **`fleetpulse/`** and **`simulators/`** (plural). Neither is used by anything —
-  the real simulator is the singular **`simulator/`**.
-- **`infra/k8s/base/` holds 11 manifests that have never been run.** `00-namespace` through
-  `10-migration-job`, written from `docs/FleetPulse-Kubernetes.md` §1. **Nothing has validated
-  them** — no `kubectl apply --dry-run`, no cluster, and minikube may not even be installed. Treat
-  them as a draft, not as working infrastructure, and validate before trusting. `infra/k8s/overlays/`
-  does not exist yet.
+- **Nothing has been applied to AWS.** The Terraform is written and the workflows exist, but
+  `.github/` is untracked, so no run has ever happened, and the one-time setup in the workflow
+  header (S3 state bucket, OIDC provider, `AWS_ROLE_ARN`) may not be done. `infra/terraform/modules/`
+  holds no FleetPulse modules — everything is inlined in `environments/dev/` against upstream
+  registry modules. There is no `prod` environment.
+- **`infra/k8s/overlays/` does not exist** — there is no Kustomize layering, just `base/`.
+- Two empty stray directories sit at the repo root: **`fleetpulse/`** and **`simulators/`**
+  (plural). Neither is used by anything — the real simulator is the singular **`simulator/`**.
 - **`infra/helm/fleetpulse/` is an untouched `helm create` scaffold**, not a FleetPulse chart. It
   deploys **one** Deployment of the stock **`nginx`** image (`values.yaml`: `image.repository:
   nginx`, `appVersion: "1.16.0"`) with the default Service, Ingress, HTTPRoute, ServiceAccount, HPA
   and test hook. Nothing in it references the five containers, Postgres, Redis or any FleetPulse
   image. Templating the real stack means rewriting it — start from `docs/FleetPulse-Kubernetes.md`,
-  and do not read the existing values as design intent. It is untracked (`?? infra/`).
-- **No linter or formatter.** No ruff, black, flake8 or mypy in either `requirements.txt`, and no
-  config for them. `pytest` is the only quality gate. Do not add one unasked.
+  and do not read the existing values as design intent.
+- **No Python linter or formatter.** No ruff, black, flake8 or mypy in either `requirements.txt`,
+  and no config for them; `pytest` is the only Python quality gate. Do not add one unasked.
+  Terraform is the exception — CI runs `terraform fmt -check -recursive` and `terraform validate`,
+  so **unformatted HCL fails the build.** Run `terraform fmt` before pushing infra changes.
+- **The two service test suites are not run by any workflow.** Only Terraform has CI.
 - **Merchant**: bulk CSV upload, barcode label sheets, pickup requests, order list. The AWB is shown
   once after booking and cannot be found again from the UI — `GET /api/v1/waybills` exists and is
   already in the shared client, only the screen is missing.

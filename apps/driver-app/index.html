@@ -39,8 +39,10 @@
       </p>
       <div id="driver-list" class="driver-list"></div>
       <div id="no-drivers" class="empty" hidden>
-        No drivers yet. Create a runsheet first:
-        <code>docker compose --profile sim run --rm simulator --parcels 20</code>
+        No drivers on the roster. <code>dispatch.drivers</code> is seeded by
+        <code>db/init.sql</code>, which only runs on a fresh volume — apply it to
+        an existing database with:
+        <code>docker compose exec -T postgres psql -U fleetadmin -d fleetpulse &lt; db/init.sql</code>
       </div>
     </div>
   </section>

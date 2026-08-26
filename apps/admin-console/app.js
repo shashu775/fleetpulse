@@ -174,17 +174,22 @@ async function loadRunsheetTab() {
   await Promise.all([loadDriverOptions(), loadAvailableParcels(), loadRunsheetList()]);
 }
 
+/** The roster for the hub currently selected above, never the whole fleet --
+ *  assigning a Kolkata driver to a Bangalore runsheet is not a real option. */
 async function loadDriverOptions() {
   const sel = $("#rs-driver");
   const keep = sel.value;
+  const hub = $("#rs-hub").value;
   try {
-    const { drivers } = await dispatch.drivers();
+    const { drivers } = await dispatch.drivers({ hub_id: hub });
     sel.innerHTML = drivers
       .map((d) => `<option value="${esc(d.driver_id)}"
                     data-name="${esc(d.driver_name)}" data-vehicle="${esc(d.vehicle_id)}">
                     ${esc(d.driver_name)} · ${esc(d.vehicle_id)}</option>`)
       .join("") + `<option value="__new">+ New driver…</option>`;
-    if (keep) sel.value = keep;
+    // The kept value belongs to the previous hub if the hub just changed, and
+    // assigning it would silently cross hubs. Only restore it if it survived.
+    if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
   } catch {
     sel.innerHTML = `<option value="__new">+ New driver…</option>`;
   }
@@ -247,7 +252,13 @@ function updateSelectedCount() {
   $("#rs-create").disabled = n === 0;
 }
 
-$("#rs-hub").addEventListener("change", loadAvailableParcels);
+// Changing the hub changes BOTH lists -- the parcels waiting there and the
+// drivers who work there. Reloading only the parcels would leave the previous
+// hub's roster on screen.
+$("#rs-hub").addEventListener("change", () => {
+  loadAvailableParcels();
+  loadDriverOptions();
+});
 $("#rs-all").addEventListener("click", () => {
   $("#rs-available").querySelectorAll('input[type=checkbox]').forEach((cb) => {
     cb.checked = true;

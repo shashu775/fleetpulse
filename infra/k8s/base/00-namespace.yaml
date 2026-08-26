@@ -1,6 +1,0 @@
-# A namespace is a folder for your resources. Everything below lives here,
-# so `kubectl delete namespace fleetpulse` cleans up in one command.
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: fleetpulse

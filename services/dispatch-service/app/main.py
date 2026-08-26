@@ -182,25 +182,110 @@ def list_runsheets(
     }
 
 
+def _driver_filters(hub_id: str | None, status: str | None) -> tuple[str, list]:
+    """Build the WHERE clause for the roster query.
+
+    Split out of the handler so it is testable without a database -- the values
+    always travel as bound parameters, never interpolated into the SQL, so the
+    only thing f-string-formatted into the query is this fixed clause text.
+    """
+    clauses, params = [], []
+    if hub_id:
+        clauses.append("d.hub_id = %s")
+        params.append(hub_id)
+    if status and status.upper() != "ALL":
+        clauses.append("d.status = %s")
+        params.append(status.upper())
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
+
+
 @app.get("/api/v1/drivers", tags=["driver"])
-def list_drivers() -> dict:
-    """Drivers who have at least one runsheet. Powers the app's login picker."""
+def list_drivers(
+    hub_id: str | None = Query(default=None, description="Filter to one hub's roster"),
+    # Defaults to ACTIVE so a caller that asks for nothing cannot accidentally
+    # offer a driver who has left. "ALL" is the deliberate opt-out -- a blank
+    # value cannot serve as one because the shared client's qs() strips empty
+    # strings before they reach the wire.
+    status: str = Query(default="ACTIVE", description='ACTIVE, INACTIVE, or "ALL"'),
+) -> dict:
+    """The driver roster. Powers the driver app's login picker and the admin
+    console's assignment dropdown.
+
+    Reads dispatch.drivers, NOT dispatch.runsheets. The older version derived
+    this list from runsheets, which meant a driver did not exist until someone
+    had already assigned them work -- so on a fresh database the picker was
+    empty and there was no way to create the first runsheet.
+
+    The runsheet count is still returned, via LEFT JOIN, so a driver with no
+    work yet appears with `runsheets: 0` instead of not appearing at all.
+    """
+    where, params = _driver_filters(hub_id, status)
+
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT driver_id, driver_name, max(vehicle_id), count(*)
-            FROM dispatch.runsheets
-            GROUP BY driver_id, driver_name
-            ORDER BY driver_name
-            """
+            f"""
+            SELECT d.driver_id, d.driver_name, d.vehicle_id, d.hub_id, d.phone,
+                   d.status, count(r.id)
+            FROM dispatch.drivers d
+            LEFT JOIN dispatch.runsheets r ON r.driver_id = d.driver_id
+            {where}
+            GROUP BY d.driver_id, d.driver_name, d.vehicle_id, d.hub_id,
+                     d.phone, d.status
+            ORDER BY d.hub_id, d.driver_name
+            """,
+            params,
         )
         rows = cur.fetchall()
     return {
         "drivers": [
-            {"driver_id": r[0], "driver_name": r[1], "vehicle_id": r[2], "runsheets": r[3]}
+            {
+                "driver_id": r[0],
+                "driver_name": r[1],
+                "vehicle_id": r[2],
+                "hub_id": r[3],
+                "phone": r[4],
+                "status": r[5],
+                "runsheets": r[6],
+            }
             for r in rows
         ]
     }
+
+
+@app.get("/api/v1/hubs", tags=["driver"])
+def list_hubs() -> dict:
+    """Hubs that have a roster, each with its drivers.
+
+    Exists because the hub list was hardcoded in four separate places
+    (admin console, hub app, merchant portal, simulator). Those copies are
+    still there -- this is the source of truth for anything that needs to know
+    which drivers and vehicles a hub actually has.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT hub_id, driver_id, driver_name, vehicle_id, status
+            FROM dispatch.drivers
+            ORDER BY hub_id, driver_name
+            """
+        )
+        rows = cur.fetchall()
+
+    hubs: dict[str, dict] = {}
+    for hub_id, driver_id, driver_name, vehicle_id, status in rows:
+        hub = hubs.setdefault(hub_id, {"hub_id": hub_id, "drivers": [], "vehicles": []})
+        hub["drivers"].append(
+            {
+                "driver_id": driver_id,
+                "driver_name": driver_name,
+                "vehicle_id": vehicle_id,
+                "status": status,
+            }
+        )
+        if status == "ACTIVE":
+            hub["vehicles"].append(vehicle_id)
+
+    return {"hubs": list(hubs.values())}
 
 
 @app.get("/api/v1/runsheets/{runsheet_id}", tags=["dispatch"])

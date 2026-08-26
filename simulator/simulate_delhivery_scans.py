@@ -47,11 +47,10 @@ NAMES = ["Ravi Kumar", "Priya Sharma", "Amit Patel", "Sneha Reddy",
          "Arjun Nair", "Kavya Iyer", "Rohit Verma"]
 STREETS = ["MG Road", "Park Street", "Brigade Road", "Linking Road",
            "Anna Salai", "Banjara Hills"]
-DRIVERS = [
-    ("DRV-4417", "Suresh Yadav", "KA01AB1234"),
-    ("DRV-8823", "Manoj Singh", "DL03CD5678"),
-    ("DRV-1192", "Vijay Kumar", "MH02EF9012"),
-]
+# Drivers are NOT hardcoded here any more -- dispatch.drivers is the roster, and
+# a copy in this file would drift from it. Fetched per hub at runtime, because a
+# runsheet must be worked by a driver who actually reports to that hub.
+DRIVER_CACHE: dict[str, list[tuple[str, str, str]]] = {}
 NDR_REASONS = ["Consignee unavailable", "Address incorrect",
                "Refused delivery", "Premises closed"]
 
@@ -59,6 +58,29 @@ OK, BAD = "[ok]", "[!!]"
 
 
 # ---------------------------------------------------------------------------
+def drivers_at(session: requests.Session, hub_id: str) -> list[tuple[str, str, str]]:
+    """The ACTIVE roster for one hub, cached for the run.
+
+    Returns [] if the hub has no drivers -- which on a database predating the
+    dispatch.drivers table means init.sql has not been applied. The caller
+    reports that rather than inventing a driver, because a made-up driver_id
+    would then show up in the driver app's picker as a real person.
+    """
+    if hub_id in DRIVER_CACHE:
+        return DRIVER_CACHE[hub_id]
+    try:
+        r = session.get(f"{DISPATCH}/api/v1/drivers", params={"hub_id": hub_id}, timeout=10)
+        r.raise_for_status()
+        roster = [
+            (d["driver_id"], d["driver_name"], d["vehicle_id"]) for d in r.json()["drivers"]
+        ]
+    except Exception as e:
+        print(f"  {BAD} could not load roster for {hub_id}: {e}")
+        roster = []
+    DRIVER_CACHE[hub_id] = roster
+    return roster
+
+
 def book_parcel(session: requests.Session) -> tuple[str, str, str] | None:
     """POST a booking. Returns (awb, origin_hub, destination_hub)."""
     origin, dest = random.sample(HUBS, 2)
@@ -184,8 +206,14 @@ def main() -> int:
     out_for_delivery: list[tuple[str, str]] = []
     for start in range(0, len(parcels), 5):
         chunk = parcels[start:start + 5]
-        driver_id, driver_name, vehicle = random.choice(DRIVERS)
         dest = chunk[0][2]
+        # The driver must belong to the hub the runsheet is raised at.
+        roster = drivers_at(session, dest)
+        if not roster:
+            print(f"  {BAD} no drivers on the roster at {dest} -- "
+                  f"apply db/init.sql to seed dispatch.drivers")
+            continue
+        driver_id, driver_name, vehicle = random.choice(roster)
 
         r = session.post(f"{DISPATCH}/api/v1/runsheets", timeout=20, json={
             "driver_id": driver_id,

@@ -55,7 +55,7 @@ jobs:
 
             - name : plan
               id: plan
-              continue-on-error: truw
+              continue-on-error: true
               run: |
                 terraform plan -input=false -no-color -out=tfplan
                 terraform show -no-color tfplan > plan.txt

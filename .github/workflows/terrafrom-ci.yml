@@ -3,7 +3,7 @@ name : Terraform
 
 on :
     push : 
-        branches : code2
+        branches : dev
     pull_request:
         paths : "infra/environments/dev/terraform"
     

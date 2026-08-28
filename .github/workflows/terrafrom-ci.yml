@@ -40,7 +40,7 @@ jobs:
 
             - uses:  aws-actions/configure-aws-credentials@v4
               with:
-                role-to-assume: ${{var.AWS_ROLE_ARN}}
+                role-to-assume: ${{vars.AWS_ROLE_ARN}}
                 role-session-name: gha-terraform-plan
                 aws-region: $((env.aws-region))
 

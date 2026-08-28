@@ -5,11 +5,69 @@ on :
     push : 
         branches : code2
     pull_request:
-        paths : "infra/terraform/**"
-        workflow_dispatch:
+        paths : "infra/environments/dev/terraform"
+    
+    workflow_dispatch:
 
+permissions: 
+    id-token : write
+    contents: read
+    pull-requests: write
 
+concurrency:
+    group : terraform-dev
+    cancel-in-progress:  false
+
+env:
+    AWS_REGION: us-east-1
+    TF_IN_AUTOMATION: true
+    WORKDIR: infra/environments/dev/terraform
 
 jobs:
+    plan:
+        name: Plan
+        runs-on: Ubuntu-latest
+        defaults: 
+            run: 
+                working-directory: infra/environments/dev/terraform
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: hashicorp/setup-terraform@v3
+              with:
+                  terraform_version: "1.160"
+            
+
+            - uses:  aws-actions/configure-aws-credentials@v4
+              with:
+                role-to-assume: ${{var.AWS_ROLE_ARN}}
+                role-session-name: gha-terraform-plan
+                aws-region: $((env.aws-region))
+
+            - name: Format Check
+              run: terraform fmt -check -recursive
+
+            - name : Init check
+              run:  terraform init -input = false
+
+            - name : validate
+              run : terraform validate -no-color
+
+            - name : plan
+              id: plan
+              continue-on-error: truw
+              run: |
+                terraform plan -input=false -no-color -out=tfplan
+                terraform show -no-color tfplan > plan.txt
+
+
+
+
+
+
+
+
+
+
 
 

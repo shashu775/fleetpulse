@@ -6,7 +6,7 @@ on:
       - "services/consignment-service/**"
       - ".github/workflows/consignment-service.yml"
   push:
-    branches: [master]
+    branches: dev
     paths:
       - "services/consignment-service/**"
       - ".github/workflows/consignment-service.yml"

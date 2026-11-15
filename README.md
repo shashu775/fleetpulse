@@ -3,8 +3,8 @@
 A microservices logistics platform modelling Delhivery-style parcel operations — built as a
 hands-on DevOps portfolio project.
 
-Two Python/FastAPI services communicating over REST, backed by PostgreSQL and Redis, orchestrated
-with Docker Compose.
+**Five web apps and two Python/FastAPI services**, backed by PostgreSQL and Redis, in five
+containers orchestrated with Docker Compose.
 
 ---
 
@@ -15,18 +15,24 @@ Docker is the only prerequisite.
 ```bash
 git clone <your-repo-url>
 cd fleetpulse
-cp .env.example .env
+cp .env.example .env              # then set a real POSTGRES_PASSWORD
 
 docker compose up --build -d
-docker compose ps                 # all four containers should be healthy
+docker compose ps                 # all five containers should be healthy
 ```
 
-Then open the interactive API docs:
+### Open **http://localhost**
 
-| | URL |
-|---|---|
-| **Consignment & Hub API** | http://localhost:8001/docs |
-| **Fleet & Dispatch API** | http://localhost:8002/docs |
+| App | URL | Who it's for |
+|---|---|---|
+| Launcher | http://localhost/ | — |
+| Merchant Portal | http://localhost/merchant/ | 🏪 Sellers — book shipments |
+| Hub Scanner | http://localhost/hub/ | 🏭 Facility operators — inbound/outbound scans |
+| Driver App | http://localhost/driver/ | 🚚 Drivers — runsheets, POD, GPS |
+| Customer Tracking | http://localhost/track/ | 📦 Recipients — track by AWB |
+| Admin Console | http://localhost/admin/ | 🎛️ Ops — create runsheets, see everything |
+
+Interactive API docs (loopback only): http://localhost:8001/docs · http://localhost:8002/docs
 
 Generate realistic traffic:
 
@@ -42,26 +48,32 @@ delivers or RTOs each one — exercising every endpoint including the cross-serv
 ## Architecture
 
 ```
-                       ┌──────────────────────────────┐
-   HTTP :8001  ───────▶│  Consignment & Hub Service   │
-                       │  AWB booking · labels        │
-                       │  hub scans · STATE MACHINE   │
-                       └──────┬───────────────┬───────┘
-                              │               │
-   HTTP :8002                 │               │
-        │                     ▼               ▼
-        │              ┌────────────┐  ┌────────────┐
-        │              │ PostgreSQL │  │   Redis    │
-        │              │ 2 schemas  │  │ cache +GPS │
-        │              └────────────┘  └────────────┘
-        │                     ▲               ▲
-        ▼                     │               │
- ┌──────────────────────┐     │               │
- │ Fleet & Dispatch     │─────┴───────────────┘
- │ runsheets · GPS      │
- │ delivery outcomes    │──── REST ────▶ Consignment
- └──────────────────────┘   (the only inter-service call)
+   browser
+      │
+      ▼
+ ┌─────────────────────────────────────────────────┐
+ │  web  :80        nginx — 1 container            │
+ │  serves /merchant/ /hub/ /driver/ /track/ /admin/│
+ │  proxies /api/consignment/*  /api/dispatch/*    │
+ └──────────┬───────────────────────┬──────────────┘
+            ▼                       ▼
+ ┌──────────────────────┐  ┌──────────────────────┐
+ │ Consignment & Hub    │  │ Fleet & Dispatch     │
+ │ AWB · labels · scans │◀─│ runsheets · GPS      │
+ │ STATE MACHINE        │  │ delivery outcomes    │
+ └──────────┬───────────┘  └──────────┬───────────┘
+            │   the only inter-        │
+            │   service call ──────────┘
+            ▼                       ▼
+     ┌────────────┐          ┌────────────┐
+     │ PostgreSQL │          │   Redis    │
+     │ 2 schemas  │          │ cache +GPS │
+     └────────────┘          └────────────┘
 ```
+
+> The five apps used to be five separate containers behind a sixth nginx gateway. They were
+> consolidated: static assets have no independent scaling profile, no state, and no independent
+> lifecycle. See [docs/FleetPulse-Architecture-Review.md](docs/FleetPulse-Architecture-Review.md).
 
 **One rule makes this microservices rather than one app in two folders:** dispatch-service never
 writes to consignment's tables, even though the database connection makes it trivially possible.
@@ -199,8 +211,13 @@ pretending it away.
 
 ```
 fleetpulse/
-├── docker-compose.yml            local stack: one command
-├── db/init.sql                   2 schemas, 4 tables
+├── docker-compose.yml            local stack: 5 containers, one command
+├── db/init.sql                   2 schemas, 5 tables
+├── apps/
+│   ├── web/                      nginx: serves all 5 apps + proxies both APIs
+│   ├── merchant-portal/  hub-app/  driver-app/
+│   └── customer-portal/  admin-console/     (sources; bundled into web)
+├── packages/web-shared/          shared API client, design system, UI helpers
 ├── services/
 │   ├── consignment-service/      booking, scans, labels, state machine
 │   └── dispatch-service/         runsheets, GPS, delivery
@@ -212,7 +229,7 @@ fleetpulse/
 
 ```bash
 docker compose up --build -d                        # start
-docker compose ps                                   # health
+docker compose ps                                   # health (5 containers)
 docker compose logs -f dispatch-service             # follow logs
 docker compose --profile sim run --rm simulator --parcels 20
 docker compose down                                 # stop

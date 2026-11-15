@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FleetPulse Admin</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎛️</text></svg>">
+<link rel="stylesheet" href="./base.css">
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="mark">FP</span>
+    <div><h1>Admin Console</h1><p>Network operations</p></div>
+  </div>
+  <div class="appbar-actions">
+    <span class="svc" id="svc-consignment">consignment</span>
+    <span class="svc" id="svc-dispatch">dispatch</span>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab is-active" data-panel="overview"  role="tab">Overview</button>
+  <button class="tab"           data-panel="parcels"   role="tab">Parcels</button>
+  <button class="tab"           data-panel="runsheets" role="tab">Runsheets</button>
+  <button class="tab"           data-panel="fleet"     role="tab">Fleet</button>
+  <button class="tab"           data-panel="apps"      role="tab">Apps</button>
+</nav>
+
+<main>
+
+  <!-- ================= OVERVIEW ================= -->
+  <section class="panel is-active" id="panel-overview">
+    <div class="stats" id="stat-cards">
+      <div class="stat"><span class="stat-label">Total parcels</span><span class="stat-value" id="s-total">—</span></div>
+      <div class="stat"><span class="stat-label">In flight</span><span class="stat-value" id="s-inflight">—</span></div>
+      <div class="stat"><span class="stat-label">Booked today</span><span class="stat-value" id="s-today">—</span></div>
+      <div class="stat"><span class="stat-label">Success rate</span><span class="stat-value" id="s-rate">—</span></div>
+      <div class="stat"><span class="stat-label">Active vehicles</span><span class="stat-value" id="s-vehicles">—</span></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2 class="h">Pipeline</h2>
+      <p class="muted small">Parcels by status across the whole network.</p>
+      <div id="pipeline" class="pipeline"></div>
+    </div>
+
+    <div class="card">
+      <h2 class="h">Needs attention</h2>
+      <div id="attention"></div>
+    </div>
+  </section>
+
+  <!-- ================= PARCELS ================= -->
+  <section class="panel" id="panel-parcels">
+    <div class="toolbar">
+      <input id="parcel-search" placeholder="Filter by AWB, merchant or consignee…" autocomplete="off">
+      <select id="parcel-status">
+        <option value="">All statuses</option>
+        <option>MANIFESTED</option>
+        <option>IN_TRANSIT</option>
+        <option>ARRIVED_AT_FACILITY</option>
+        <option>OUT_FOR_DELIVERY</option>
+        <option>DELIVERED</option>
+        <option>RTO</option>
+      </select>
+      <button class="btn ghost none" id="parcels-refresh">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>AWB</th><th>Route</th><th>Merchant</th><th>Consignee</th>
+          <th>Payment</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody id="parcel-body"></tbody>
+      </table>
+    </div>
+    <div id="parcel-empty" class="empty" hidden></div>
+    <p class="small muted" id="parcel-count" style="margin-top:10px"></p>
+  </section>
+
+  <!-- ================= RUNSHEETS ================= -->
+  <section class="panel" id="panel-runsheets">
+
+    <!-- The gap this console exists to close: creating a runsheet without
+         the simulator or a raw API call. -->
+    <div class="card accent">
+      <div class="card-head">
+        <div>
+          <h2 class="h" style="margin:0">Create a runsheet</h2>
+          <p class="muted small" style="margin:4px 0 0">
+            Assign parcels sitting at a facility to a driver. This is the hand-off
+            from the hub to the last mile.
+          </p>
+        </div>
+        <span class="badge">Step 1 of 3</span>
+      </div>
+
+      <div class="form-grid" style="margin-top:14px">
+        <label>Facility
+          <select id="rs-hub"></select>
+        </label>
+        <label>Driver
+          <select id="rs-driver"></select>
+        </label>
+        <label id="rs-newdriver-wrap" hidden>New driver name
+          <input id="rs-driver-name" placeholder="e.g. Anil Sharma">
+        </label>
+        <label id="rs-newvehicle-wrap" hidden>Vehicle number
+          <input id="rs-vehicle" class="mono" placeholder="KA01AB1234">
+        </label>
+      </div>
+
+      <div class="picker-head">
+        <span class="small muted" id="rs-avail-label">Parcels ready at this facility</span>
+        <div class="row none" style="gap:6px">
+          <button class="btn ghost sm" id="rs-all">Select all</button>
+          <button class="btn ghost sm" id="rs-none">Clear</button>
+        </div>
+      </div>
+
+      <div id="rs-available" class="picker"></div>
+      <div id="rs-avail-empty" class="empty" hidden>
+        No parcels at <b id="rs-empty-hub"></b> are ready for delivery.<br>
+        <span class="small">A parcel must be <code>ARRIVED_AT_FACILITY</code> — scan it inbound in the Hub app first.</span>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <span class="small muted none" id="rs-selected-count">0 selected</span>
+        <button class="btn none" id="rs-create" disabled>Create runsheet</button>
+      </div>
+      <div id="rs-result" style="margin-top:12px" hidden></div>
+    </div>
+
+    <div class="card-head" style="margin:20px 0 12px">
+      <h2 class="h" style="margin:0">All runsheets</h2>
+      <button class="btn ghost sm" id="rs-refresh">Refresh</button>
+    </div>
+    <div id="rs-list"></div>
+    <div id="rs-list-empty" class="empty" hidden>No runsheets yet.</div>
+  </section>
+
+  <!-- ================= FLEET ================= -->
+  <section class="panel" id="panel-fleet">
+    <div class="card-head" style="margin-bottom:12px">
+      <p class="muted small" style="margin:0">
+        Live positions from Redis, 1-hour TTL. A vehicle that stops reporting disappears on its own.
+      </p>
+      <button class="btn ghost sm" id="fleet-refresh">Refresh</button>
+    </div>
+    <div id="fleet-cards" class="cards"></div>
+    <div id="fleet-empty" class="empty" hidden>
+      No vehicles reporting.<br>
+      <span class="small">Open the Driver app, start a runsheet and turn on GPS reporting.</span>
+    </div>
+  </section>
+
+  <!-- ================= APPS ================= -->
+  <section class="panel" id="panel-apps">
+    <div class="card">
+      <h2 class="h">Applications</h2>
+      <p class="muted small">
+        <b>Path URLs work with no setup</b> — use those first. Hostnames additionally need the
+        one-time hosts-file entry below.
+      </p>
+      <div class="table-wrap" style="margin-top:12px">
+        <table>
+          <thead><tr><th>App</th><th>Hostname</th><th>Path</th><th>Port</th></tr></thead>
+          <tbody id="apps-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="h">Enable the hostnames</h2>
+      <p class="muted small">
+        Optional. Run once in an <b>Administrator</b> PowerShell, then reload.
+        Without it the hostnames will not resolve — but every path URL above keeps working.
+      </p>
+      <pre class="code" id="hosts-cmd"></pre>
+      <button class="btn ghost sm" id="copy-hosts">Copy command</button>
+      <p class="muted small" style="margin-top:12px">
+        We use <code>.localhost</code> rather than <code>.local</code> on purpose:
+        RFC&nbsp;6762 reserves <code>.local</code> for mDNS/Bonjour, so those lookups can bypass
+        the hosts file and fail intermittently. <code>.localhost</code> is reserved for loopback
+        by RFC&nbsp;6761, and Chrome, Edge and Firefox resolve it internally.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2 class="h">Backend</h2>
+      <div class="row" style="flex-wrap:wrap">
+        <a class="btn ghost" href="http://localhost:8001/docs" target="_blank" rel="noopener">Consignment API docs ↗</a>
+        <a class="btn ghost" href="http://localhost:8002/docs" target="_blank" rel="noopener">Dispatch API docs ↗</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  FleetPulse Admin Console ·
+  <b>No authentication.</b> This console can create runsheets and read every parcel in the network.
+  It must not be exposed beyond localhost until real auth exists.
+</footer>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

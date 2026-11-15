@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: 
+   namespace: fleetpulse
+   name: consignment
+spec: 
+     replicas: 1
+     selector:
+          matchLabels: 
+                app: consignment
+     template:
+           metadata:
+               labels:
+                 app: consignment
+           spec:
+               containers: 
+                 - name: consignment
+                   image: travel2024/consignment:latest
+                   # Docker Desktop's Kubernetes shares the local Docker daemon,
+                   # so a locally built image is already here. Without this,
+                   # a :latest tag defaults to pullPolicy Always and Kubernetes
+                   # reaches for Docker Hub instead.
+                   imagePullPolicy: IfNotPresent
+                   ports:
+                     - containerPort: 8000
+                   # Readiness gates traffic: without it the Service sends
+                   # requests to a pod whose DB pool is not open yet.
+                   readinessProbe:
+                     httpGet: { path: /health, port: 8000 }
+                     initialDelaySeconds: 5
+                     periodSeconds: 10
+                   resources:
+                     limits:
+                       memory: "512Mi"
+                       cpu: "500m"
+                     requests:
+                       memory: "256Mi"
+                       cpu: "250m"
+                   envFrom:
+                       - configMapRef:
+                           name: app-config
+                       - secretRef:
+                           name: fleetpulse-secrets   
+               initContainers:
+                    - name: init-consignment
+                      image: busybox
+                      command:
+                                - sh
+                                - -c
+                                - |
+                                 timeout=300
+
+                                 echo "Waiting for Redis..."
+                                 timeout $timeout sh -c 'until nc -z redis-service 6379; do sleep 5; done'
+
+                                 echo "Waiting for PostgreSQL..."
+                                 timeout $timeout sh -c 'until nc -z postgres-service 5432; do sleep 5; done'
+
+                                 echo "Dependencies ready"
+---
+apiVersion: v1
+kind: Service
+metadata: 
+   namespace: fleetpulse
+   name: consignment-service
+spec:
+   selector:
+       app: consignment
+   ports:
+     - protocol: TCP
+       port: 8000
+       targetPort: 8000

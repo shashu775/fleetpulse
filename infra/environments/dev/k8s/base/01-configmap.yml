@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: fleetpulse
+data:
+  # /!\ These keys become environment variables VERBATIM, and env vars are
+  #     case-sensitive. The code reads REDIS_URL (services/*/app/cache.py) and
+  #     CONSIGNMENT_URL (dispatch/app/consignment_client.py). Spelled any other
+  #     way, the app silently falls back to its built-in default instead of
+  #     failing -- which is harder to spot than a crash.
+  LOG_LEVEL: "INFO"
+  REDIS_URL: "redis://redis-service:6379/0"
+  CONSIGNMENT_URL: "http://consignment-service:8000"

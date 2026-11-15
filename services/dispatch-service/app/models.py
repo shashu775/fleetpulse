@@ -30,3 +30,13 @@ class DeliveryRequest(BaseModel):
     runsheet_id: str = Field(..., examples=["RS-20260813-01-417"])
     outcome: Literal["DELIVERED", "RTO"]
     reason: Optional[str] = None
+
+    # ---- Proof of delivery, captured by the driver app ----
+    pod_type: Optional[Literal["OTP", "SIGNATURE", "PHOTO"]] = None
+    pod_receiver: Optional[str] = Field(
+        default=None, max_length=120, description="Who actually took the parcel"
+    )
+    # For SIGNATURE this is a data: URL from the canvas; for OTP, the code the
+    # consignee read out. Capped because an unbounded TEXT field accepting
+    # base64 images is a denial-of-service waiting to happen.
+    pod_data: Optional[str] = Field(default=None, max_length=200_000)

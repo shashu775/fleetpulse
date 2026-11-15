@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FleetPulse Hub Scanner</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏭</text></svg>">
+<link rel="stylesheet" href="./base.css">
+<style>
+  /* Hub operators scan hundreds of parcels an hour with a handheld gun.
+     The scan input must be huge, always focused, and never need a mouse. */
+  .scan-box { text-align: center; padding: 26px 20px; }
+  .scan-box input {
+    font: 700 26px/1.2 var(--mono); text-align: center; letter-spacing: 3px;
+    padding: 18px; text-transform: uppercase;
+  }
+  .feed { margin-top: 16px; max-height: 460px; overflow-y: auto; }
+  .feed-row {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 13.5px;
+  }
+  .feed-row:last-child { border-bottom: 0; }
+  .feed-row .mono { font-weight: 700; }
+  .feed-row.err { background: var(--bad-sub); }
+</style>
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="mark">FP</span>
+    <div><h1>Hub Scanner</h1><p id="hub-label">—</p></div>
+  </div>
+  <div class="appbar-actions">
+    <span class="svc" id="svc-consignment">consignment</span>
+  </div>
+</header>
+
+<main class="narrow">
+
+  <div class="card scan-box">
+    <div class="form-grid" style="margin-bottom:16px">
+      <label>Hub<select id="hub"></select></label>
+      <label>Scan type
+        <select id="scan-type">
+          <option value="IN_TRANSIT">Outbound — departing this hub</option>
+          <option value="ARRIVED_AT_FACILITY">Inbound — arriving at this hub</option>
+        </select>
+      </label>
+    </div>
+
+    <form id="scan-form">
+      <input id="awb" class="mono" placeholder="SCAN AWB" autocomplete="off"
+             spellcheck="false" autofocus>
+    </form>
+    <p class="small muted" style="margin:10px 0 0">
+      Barcode guns type the AWB then press Enter — no mouse needed.
+    </p>
+  </div>
+
+  <div class="stats" style="margin-top:12px">
+    <div class="stat"><span class="stat-label">Scanned</span><span class="stat-value" id="n-ok">0</span></div>
+    <div class="stat"><span class="stat-label">Rejected</span><span class="stat-value" id="n-err">0</span></div>
+    <div class="stat"><span class="stat-label">Rate</span><span class="stat-value" id="n-rate">—</span></div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <div class="card-head">
+      <h2 style="margin:0;font-size:15px">Scan feed</h2>
+      <button class="btn ghost sm" id="clear">Clear</button>
+    </div>
+    <div class="feed" id="feed"></div>
+    <div class="empty" id="feed-empty">Nothing scanned yet.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2 style="margin:0;font-size:17px">Planned</h2>
+      <span class="badge warn">Not built</span>
+    </div>
+    <ul class="small muted" style="line-height:2;margin:10px 0 0">
+      <li><b>Bag tagging</b> — group parcels into a bag for one destination · <code>POST /api/v1/bags</code></li>
+      <li><b>Transit manifests</b> — seal a bag to a vehicle · <code>POST /api/v1/manifests</code></li>
+      <li><b>Sort-to-lane guidance</b> — tell the operator which chute per AWB</li>
+      <li><b>Camera QR scanning</b> — for phones without a handheld gun</li>
+    </ul>
+  </div>
+
+</main>
+
+<footer>FleetPulse Hub Scanner · no authentication — anyone can scan as any hub.</footer>
+
+<script type="module">
+import { consignment, health } from "./api.js";
+import { $, badge, esc, fmtTime, show, toast, wireHealthDots } from "./ui.js";
+
+const HUBS = ["HUB-BLR-01","HUB-CHN-02","HUB-HYD-01","HUB-DEL-03","HUB-MUM-01","HUB-KOL-02"];
+HUBS.forEach((h, i) => $("#hub").add(new Option(h, h, i === 0, i === 0)));
+
+let ok = 0, err = 0;
+const started = Date.now();
+
+function setHubLabel() { $("#hub-label").textContent = $("#hub").value; }
+$("#hub").addEventListener("change", setHubLabel);
+setHubLabel();
+
+$("#scan-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = $("#awb");
+  const awb = input.value.trim().toUpperCase();
+  if (!awb) return;
+
+  // Clear immediately so the operator can keep scanning without waiting for
+  // the request to finish -- throughput matters more than sequencing here.
+  input.value = "";
+  input.focus();
+
+  const hub = $("#hub").value;
+  const status = $("#scan-type").value;
+
+  try {
+    const r = await consignment.scan({ awb, status, hub_id: hub, remarks: `Hub scan at ${hub}` });
+    ok++;
+    addRow(awb, `${r.previous_status} → ${r.new_status}`, false);
+  } catch (ex) {
+    err++;
+    addRow(awb, ex.message, true);
+    toast(`${awb}: ${ex.message}`, "bad", 4000);
+  }
+  updateStats();
+});
+
+function addRow(awb, detail, isErr) {
+  show($("#feed-empty"), false);
+  const row = document.createElement("div");
+  row.className = `feed-row ${isErr ? "err" : ""}`;
+  row.innerHTML = `
+    <span class="mono">${esc(awb)}</span>
+    <span class="small ${isErr ? "" : "muted"}">${esc(detail)}</span>
+    <span class="small muted">${fmtTime(new Date().toISOString())}</span>`;
+  $("#feed").prepend(row);
+}
+
+function updateStats() {
+  $("#n-ok").textContent = ok;
+  $("#n-err").textContent = err;
+  const mins = (Date.now() - started) / 60000;
+  $("#n-rate").textContent = mins > 0.2 ? `${Math.round((ok + err) / mins)}/min` : "—";
+}
+
+$("#clear").addEventListener("click", () => {
+  $("#feed").innerHTML = "";
+  show($("#feed-empty"), true);
+});
+
+// Keep focus on the scan field: a handheld gun is a keyboard, and a lost
+// focus means scans silently go nowhere.
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("select, button, a")) $("#awb").focus();
+});
+
+wireHealthDots(health);
+</script>
+</body>
+</html>

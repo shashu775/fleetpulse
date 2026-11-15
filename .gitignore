@@ -22,11 +22,19 @@ htmlcov/
 Thumbs.db
 
 # Infrastructure & containers
+# NEVER commit these: state holds every value in PLAINTEXT (passwords, tokens),
+# .terraform/ is hundreds of MB of downloaded providers, and a saved plan can
+# contain the same secrets as state.
 .terraform/
 *.tfstate
 *.tfstate.backup
-.terraform.lock.hcl
 tfplan
+
+# .terraform.lock.hcl is deliberately NOT ignored -- it is Terraform's
+# package-lock.json, pinning provider versions AND their checksums. Ignoring it
+# lets CI and your laptop resolve different aws provider versions from the same
+# "~> 5.70" constraint, producing plans that differ for reasons invisible in the
+# diff. Commit it.
 
 # Build artifacts
 dist/

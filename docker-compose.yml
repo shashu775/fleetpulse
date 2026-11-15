@@ -24,7 +24,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdevpassword}
       POSTGRES_DB: ${POSTGRES_DB:-fleetpulse}
     ports:
-      - "5432:5432"          # so you can connect with pgAdmin / DBeaver / psql
+      # 127.0.0.1 = loopback ONLY. Without this prefix Docker binds 0.0.0.0 and
+      # the database is reachable by anyone on your LAN, with the credentials
+      # that are committed in .env.example.
+      - "127.0.0.1:5432:5432"
     volumes:
       # Scripts here run automatically on FIRST start only. If you edit
       # init.sql you must `docker compose down -v` to see the change.
@@ -47,7 +50,7 @@ services:
     # of growing until the kernel OOM-kills something.
     command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"   # Redis has NO password -- never expose it
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -66,7 +69,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
-      - "8001:8000"          # host 8001 -> container 8000
+      - "127.0.0.1:8001:8000"   # Swagger + debug only; gateway is the real door
     depends_on:
       # service_healthy, not service_started: the app never boots against a
       # half-ready database.
@@ -95,7 +98,7 @@ services:
       CONSIGNMENT_URL: http://consignment-service:8000
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
-      - "8002:8000"
+      - "127.0.0.1:8002:8000"
     depends_on:
       postgres:            { condition: service_healthy }
       redis:               { condition: service_healthy }
@@ -103,6 +106,32 @@ services:
     volumes:
       - ./services/dispatch-service/app:/code/app
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    restart: unless-stopped
+
+  # ==========================================================
+  # WEB TIER -- all five apps + the API proxy in ONE container.
+  #
+  # This replaced six containers (a gateway plus one nginx per app). Static
+  # assets have no independent scaling profile, no state and no independent
+  # lifecycle, and since every app embeds packages/web-shared, a change there
+  # rebuilt all five images anyway.
+  #
+  # Built from the REPO ROOT so the image can copy apps/ AND packages/.
+  # Serves:
+  #   /  /merchant/  /hub/  /driver/  /track/  /admin/     (static, no proxy)
+  #   /api/consignment/*  /api/dispatch/*                  (proxied)
+  #   plus a vhost per app hostname -- see apps/web/nginx.conf
+  # ==========================================================
+  web:
+    build:
+      context: .                       # repo root: needs apps/ AND packages/
+      dockerfile: apps/web/Dockerfile
+    container_name: fp-web
+    ports:
+      - "80:80"                        # <-- http://localhost  (the only public port)
+    depends_on:
+      consignment-service: { condition: service_started }
+      dispatch-service:    { condition: service_started }
     restart: unless-stopped
 
   # ==========================================================

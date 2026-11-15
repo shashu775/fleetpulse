@@ -1,0 +1,93 @@
+/* Customer tracking portal -- public, calm, no jargon. */
+
+main { padding-bottom: 40px; }
+
+.hero { text-align: center; padding: 32px 0 24px; }
+.hero h2 { margin: 0 0 6px; font-size: clamp(22px, 5vw, 30px); letter-spacing: -.5px; }
+.hero p { margin: 0 0 20px; }
+
+.track-form { display: flex; gap: 8px; max-width: 460px; margin: 0 auto; }
+.track-form input {
+  flex: 1; text-align: center; font-size: 17px; letter-spacing: 2px;
+  text-transform: uppercase; padding: 13px 14px;
+}
+.track-form .btn { flex: none; padding: 13px 26px; }
+@media (max-width: 420px) {
+  .track-form { flex-direction: column; }
+  .track-form .btn { width: 100%; }
+}
+
+#recent-links { display: inline-flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+#recent-links button {
+  background: none; border: 0; padding: 0;
+  color: var(--accent); font: 600 12.5px var(--mono); cursor: pointer;
+}
+#recent-links button:hover { text-decoration: underline; }
+
+.loading { text-align: center; padding: 34px; color: var(--muted); font-size: 14px; }
+.loading .spinner { vertical-align: -3px; margin-right: 8px; }
+
+/* ---------- Status headline ---------- */
+.status-hero {
+  display: flex; align-items: center; gap: 16px;
+  padding: 20px; margin-bottom: 12px;
+  border-radius: var(--radius);
+  background: var(--accent-sub); border: 1px solid transparent;
+}
+.status-hero.ok   { background: var(--ok-sub); }
+.status-hero.bad  { background: var(--bad-sub); }
+.status-hero.warn { background: var(--warn-sub); }
+.status-icon { font-size: 34px; line-height: 1; flex: none; }
+.status-title { font-size: 19px; font-weight: 700; letter-spacing: -.3px; }
+.status-sub { font-size: 13.5px; margin-top: 2px; }
+
+/* ---------- Progress rail ---------- */
+.rail {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; justify-content: space-between; position: relative;
+}
+/* The connecting line sits behind the dots. */
+.rail::before {
+  content: ""; position: absolute; left: 6%; right: 6%; top: 13px;
+  height: 3px; background: var(--border); border-radius: 2px;
+}
+.rail li {
+  position: relative; z-index: 1; flex: 1;
+  display: flex; flex-direction: column; align-items: center; gap: 7px;
+  text-align: center;
+}
+.rail .dot {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--surface); border: 3px solid var(--border);
+  display: grid; place-items: center;
+  font-size: 12px; line-height: 1;
+}
+.rail li.done .dot { background: var(--ok); border-color: var(--ok); color: #fff; }
+.rail li.current .dot {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+  box-shadow: 0 0 0 5px var(--accent-sub);
+}
+.rail li.failed .dot { background: var(--bad); border-color: var(--bad); color: #fff; }
+.rail .rail-label {
+  font-size: 10.5px; font-weight: 600; color: var(--muted);
+  line-height: 1.25; max-width: 74px;
+}
+.rail li.done .rail-label,
+.rail li.current .rail-label { color: var(--text); }
+
+/* ---------- Details ---------- */
+.kv-grid {
+  display: grid; gap: 13px; margin-top: 15px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.kv { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kv span {
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.kv b { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+
+.section-label {
+  font: 700 11.5px/1 var(--sans); text-transform: uppercase; letter-spacing: .5px;
+  color: var(--muted); margin: 0 0 14px;
+}

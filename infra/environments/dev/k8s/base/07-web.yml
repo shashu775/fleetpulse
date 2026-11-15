@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: fleetpulse
+  name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata: 
+      labels:
+        app: web  
+    spec:
+      containers:
+        - name: web
+          image: travel2024/web:latest
+          imagePullPolicy: IfNotPresent      # see the note in 05-consignment.yml
+          ports:
+            - containerPort: 80
+          resources:
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+          # /healthz is served by nginx itself and touches no backend, which is
+          # exactly what a probe should do. httpGet is sent to the POD IP, so it
+          # sidesteps the nginx:alpine trap where `localhost` resolves to ::1
+          # while `listen 80` binds IPv4 only.
+          readinessProbe:
+            httpGet: { path: /healthz, port: 80 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 80 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+# NO initContainer here, deliberately. web is static nginx plus a proxy -- it
+# holds no database or Redis connection, so making it wait on Postgres only
+# means a backend problem takes the whole UI down with it. The UI is precisely
+# what you want to be able to open when the backends are broken.
+#
+# It also carries no envFrom: nothing in nginx reads LOG_LEVEL or REDIS_URL, and
+# injecting DATABASE_URL into a public-facing container is a needless leak.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: fleetpulse
+  name: web-service
+spec: 
+    selector:
+      app: web
+    ports:    
+      - protocol : TCP
+        port: 80
+        targetPort: 80

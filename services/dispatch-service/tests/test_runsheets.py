@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.consignment_client import ConsignmentError
-from app.main import app
+from app.main import _driver_filters, app
 from app.models import DeliveryRequest
 
 client = TestClient(app)
@@ -156,3 +156,40 @@ def test_client_surfaces_409_reason(monkeypatch):
     from app import consignment_client as cc
     with pytest.raises(ConsignmentError, match="Illegal status change"):
         cc.update_status("FP1", "OUT_FOR_DELIVERY")
+
+
+# ---------------------------------------------------------------------------
+# Driver roster filtering -- pure function, so no database is involved
+# ---------------------------------------------------------------------------
+def test_roster_defaults_to_active_only():
+    """A caller who asks for nothing must not be offered a driver who left."""
+    where, params = _driver_filters(None, "ACTIVE")
+    assert where == "WHERE d.status = %s"
+    assert params == ["ACTIVE"]
+
+
+def test_roster_filters_by_hub_and_status_together():
+    where, params = _driver_filters("HUB-BLR-01", "ACTIVE")
+    assert where == "WHERE d.hub_id = %s AND d.status = %s"
+    assert params == ["HUB-BLR-01", "ACTIVE"]
+
+
+@pytest.mark.parametrize("status", ["ALL", "all", "All"])
+def test_roster_all_drops_the_status_filter(status):
+    """'ALL' is the opt-out; an empty string cannot be, because the shared
+    web client's qs() strips empty values before they reach the server."""
+    where, params = _driver_filters("HUB-MUM-01", status)
+    assert where == "WHERE d.hub_id = %s"
+    assert params == ["HUB-MUM-01"]
+
+
+def test_roster_unfiltered_produces_no_where_clause():
+    assert _driver_filters(None, "ALL") == ("", [])
+
+
+def test_roster_values_are_bound_never_interpolated():
+    """The clause text is fixed; user input only ever appears in params. A hub
+    id containing SQL must therefore come back untouched as a bound value."""
+    where, params = _driver_filters("HUB'; DROP TABLE dispatch.drivers; --", None)
+    assert where == "WHERE d.hub_id = %s"
+    assert params == ["HUB'; DROP TABLE dispatch.drivers; --"]

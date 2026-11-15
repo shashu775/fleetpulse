@@ -1,0 +1,81 @@
+name: consignment-service-ci
+
+on:
+  pull_request:
+    paths:
+      - "services/consignment-service/**"
+      - ".github/workflows/consignment-service.yml"
+  push:
+    branches: dev
+    paths:
+      - "services/consignment-service/**"
+      - ".github/workflows/consignment-service.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-2
+  ECR_REPO: fleetpulse/consignment-service
+  SERVICE_DIR: services/consignment-service
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.SERVICE_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest          # picks up pytest.ini automatically
+
+  build-scan-push:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.SERVICE_DIR }}
+          file: ${{ env.SERVICE_DIR }}/Dockerfile
+          load: true
+          tags: local/consignment-service:${{ github.sha }}
+          cache-from: type=gha,scope=consignment-service
+          cache-to: type=gha,mode=max,scope=consignment-service
+
+
+      - name: Configure AWS credentials (OIDC)
+        if: github.ref == 'refs/heads/dev'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/gha-ecr-push
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        if: github.ref == 'refs/heads/dev'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag and push
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          IMAGE=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          docker tag local/consignment-service:${{ github.sha }} "$IMAGE"
+          docker push "$IMAGE"
+          echo "### Pushed \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"

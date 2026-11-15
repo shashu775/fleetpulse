@@ -8,12 +8,15 @@ itself -- it asks consignment-service over HTTP. See consignment_client.py.
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from . import consignment_client as cc
+from . import metrics
 from .cache import redis_client
 from .db import close_pool, get_conn, init_pool
 from .models import DeliveryRequest, GPSPing, RunsheetRequest
@@ -42,6 +45,26 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def collect_http_metrics(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    route = request.scope.get("route")
+    endpoint = route.path if route else "unmatched"
+    metrics.http_requests_total.labels(
+        method=request.method, endpoint=endpoint, status=str(response.status_code)
+    ).inc()
+    metrics.http_request_duration_seconds.labels(
+        method=request.method, endpoint=endpoint
+    ).observe(time.perf_counter() - started)
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health", tags=["ops"])

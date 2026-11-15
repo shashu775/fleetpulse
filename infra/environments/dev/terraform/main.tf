@@ -3,11 +3,11 @@ provider "aws" {
 }
 
 data "aws_availability_zones" "available" {
-  state = "avaialble"
+  state = "available"
 }
 
 locals {
-  azs = slice(data.aws_avaialbilty_zones.available.names, 0, 2)
+  azs = slice(data.aws_availability_zones.available.names, 0, 2)
 }
 
 module "vpc" {
@@ -19,11 +19,14 @@ module "vpc" {
 
   enable_nat_gateway = false
 
-  public_subnets = [for k, az in locals.azs : cidrsubnet(var.vpc_cidr, k + 8, 4)]
+  azs = local.azs
 
+  public_subnets = [for k, az in local.azs : cidrsubnet(var.vpc_cidr, k + 8, 4)]
+  map_public_ip_on_launch = true
+  
   public_subnet_tags = {
     "kubernetes.io/roles/elb"                   = 1
-    "kubernetes.io/cluster/${var.cluster_name}" = owned
+    "kubernetes.io/cluster/${var.cluster_name}" = "owned"
   }
 }
 
@@ -44,20 +47,22 @@ module "eks" {
 
 
   eks_managed_node_groups = {
-    ami_type      = var.EKS_node_group_AMI
-    instance_type = var.EKS_node_group_instance_type
+    general = {
+      ami_type      = var.EKS_node_group_AMI
+      instance_type = var.EKS_node_group_instance_type
 
-    desired_size  = var.EKS_desired_capacity
-    max_size      = var.EKS_max_size
-    min_size      = var.EKS_min_size
-    capacity_type = var.EKS_capacity_type
+      desired_size  = var.EKS_desired_capacity
+      max_size      = var.EKS_max_size
+      min_size      = var.EKS_min_size
+      capacity_type = var.EKS_capacity_type
 
-    labels = {
-      roles = "general"
-    }
+      labels = {
+        roles = "general"
+      }
 
-    tags = {
-      Environment = var.Environment
+      tags = {
+        Environment = var.Environment
+      }
     }
   }
 
@@ -66,22 +71,21 @@ module "eks" {
       most_recent = true
     }
 
-    vpc_cni = {
+    vpc-cni = {
       most_recent = true
     }
 
-    kube_proxy = {
+    kube-proxy = {
       most_recent = true
     }
 
-    aws_ebs_csi_driver = {
+    aws-ebs-csi-driver = {
       most_recent = true
     }
+  }
+  tags = {
 
-    tags = {
-
-      Environment = var.Environment
-    }
+    Environment = var.Environment
   }
 
 }

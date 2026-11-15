@@ -32,6 +32,17 @@ spec:
           volumeMounts:
             - name: sql
               mountPath: /sql
+      initContainers:
+      - name: wait-for-postgres
+        image: postgres:16-alpine
+        command: 
+            - sh
+            - -c
+            - | 
+               until pg_isready -h postgres-service -p 5432; do
+                 echo "waiting for postgres"
+                 sleep 2
+               done
       volumes:
         # The SAME ConfigMap the StatefulSet in 03-postgres.yml mounts, so there
         # is exactly one copy of the schema in the cluster. Created by hand --

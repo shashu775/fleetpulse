@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{.Release.Namespace}}
+  namespace: {{.Release.Namespace}}
+spec:
+  ingressClassName: nginx
+  rules:
+    # .test, NOT .local -- RFC 6762 reserves .local for mDNS/Bonjour, so those
+    # lookups can race or bypass the hosts file. Also NOT .localhost: that is
+    # the Docker Compose hostname. Keeping them different is what tells you
+    # which stack you are actually looking {{.Values.web.name}}
+    #
+    # Needs a hosts-file{{.Values.web.name}}try:  127.0.0.1 {{.Release.Namespace}}.test
+    - host: {{.Release.Namespace}}.test
+      http:
+        paths:
+           - path : /
+             pathType: Prefix
+             backend:
+               service:
+                 # The Service in 07-web.yml is "web-service". The Deployment
+                 # is "web" -- an Ingress points at th{{.Values.web.name}}ervice, never the pod.
+                 name: {{.Values.web.name}}-service
+                 port: { number: {{.Values.web.port}} }

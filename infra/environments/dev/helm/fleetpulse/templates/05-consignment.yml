@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: 
+   namespace: {{.Release.Namespace}}
+   name: {{.Values.consignment.name}}
+spec: 
+     replicas: {{.Values.consignment.replicas}}
+     selector:
+          matchLabels: 
+                app: {{.Values.consignment.name}}
+     template:
+           metadata:
+               labels:
+                 app: {{.Values.consignment.name}}
+               annotations:
+                 prometheus.io/scrape: "true"
+                 prometheus.io/path: /metrics
+                 prometheus.io/port: "8000"
+           spec:
+               containers: 
+                 - name: {{.Values.consignment.name}}
+                   image: {{.Values.consignment.image}}
+                   # Docker Desktop's Kubernetes shares the local Docker daemon,
+                   # so a locally built image is already here. Without this,
+                   # a :latest tag defaults to pullPolicy Always and Kubernetes
+                   # reaches for Docker Hub instead.
+                   imagePullPolicy: IfNotPresent
+                   ports:
+                     - containerPort: {{.Values.consignment.targetPort}}
+                   # Readiness gates traffic: without it the Service sends
+                   # requests to a pod whose DB pool is not open yet.
+                   readinessProbe:
+                     httpGet: { path: /health, port: 8000 }
+                     initialDelaySeconds: 5
+                     periodSeconds: 10
+                   resources:
+                     limits:
+                       memory: "{{.Values.consignment.memlim}}"
+                       cpu: "{{.Values.consignment.cpulim}}"
+                     requests:
+                       memory: "{{.Values.consignment.memreq}}"
+                       cpu: "{{.Values.consignment.cpureq}}"
+                   envFrom:
+                       - configMapRef:
+                           name: {{.Release.Namespace}}-config
+                       - secretRef:
+                           name: {{.Release.Namespace}}-secrets   
+               initContainers:
+                    - name: init-consignment
+                      image: busybox
+                      command:
+                                - sh
+                                - -c
+                                - |
+                                 timeout=300
+
+                                 echo "Waiting for Redis..."
+                                 timeout $timeout sh -c 'until nc -z redis-service 6379; do sleep 5; done'
+
+                                 echo "Waiting for PostgreSQL..."
+                                 timeout $timeout sh -c 'until nc -z postgres 5432; do sleep 5; done'
+
+                                 echo "Dependencies ready"
+---
+apiVersion: v1
+kind: Service
+metadata: 
+   namespace: {{.Release.Namespace}}
+   name: {{.Values.consignment.name}}-service
+   labels:
+     app: {{.Values.consignment.name}}
+spec:
+   selector:
+       app: {{.Values.consignment.name}}
+   ports:
+     - protocol: TCP
+       name: metrics
+       port: {{.Values.consignment.port}}
+       targetPort: {{.Values.consignment.targetPort}}

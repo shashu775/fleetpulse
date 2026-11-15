@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: {{.Release.Namespace}}
+  name: {{.Values.dispatch.name}}
+spec:
+  replicas: {{.Values.dispatch.replicas}}
+  selector:
+    matchLabels:
+      app: {{.Values.dispatch.name}}
+  template:
+    metadata: 
+      labels:
+        app: {{.Values.dispatch.name}}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8000"
+    spec:
+      containers:
+        - name: {{.Values.dispatch.name}}
+          image: {{.Values.dispatch.image}}
+          imagePullPolicy: IfNotPresent      # see the note in 05-consignment.yml
+          ports:
+            - containerPort: {{.Values.dispatch.targetPort}}
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:
+              memory: "{{.Values.dispatch.memlim}}"
+              cpu: "{{.Values.dispatch.cpulim}}"
+            requests:
+              memory: "{{.Values.dispatch.memreq}}"
+              cpu: "{{.Values.dispatch.cpureq}}"
+          envFrom:
+            - configMapRef:
+                name: {{.Release.Namespace}}-config
+            - secretRef:
+                name: {{.Release.Namespace}}-secrets
+      initContainers:
+            - name: init-dispatch
+              image: busybox
+              command:
+                - sh
+                - -c
+                - |
+                  timeout=300
+
+                  echo "Waiting for Redis..."
+                  timeout $timeout sh -c 'until nc -z redis-service 6379; do sleep 5; done'
+
+                  echo "Waiting for PostgreSQL..."
+                  timeout $timeout sh -c 'until nc -z postgres 5432; do sleep 5; done'
+
+                  echo "Dependencies ready"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: {{.Release.Namespace}}
+  name: {{.Values.dispatch.name}}-service
+  labels:
+    app: {{.Values.dispatch.name}}
+spec:
+  selector:
+    app: {{.Values.dispatch.name}}
+  ports:
+    - protocol: TCP 
+      name: metrics
+      port: {{.Values.dispatch.port}}
+      targetPort: {{.Values.dispatch.targetPort}}

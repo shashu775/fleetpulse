@@ -109,6 +109,26 @@ services:
     restart: unless-stopped
 
   # ==========================================================
+  # OBSERVABILITY (profile: does not start with `up`)
+  #   docker compose --profile obs up -d
+  # ==========================================================
+  prometheus:
+    profiles: ["obs"]
+    image: prom/prometheus:v2.54.1
+    container_name: fp-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=24h
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      consignment-service: { condition: service_started }
+      dispatch-service:    { condition: service_started }
+    restart: unless-stopped
+
+  # ==========================================================
   # WEB TIER -- all five apps + the API proxy in ONE container.
   #
   # This replaced six containers (a gateway plus one nginx per app). Static

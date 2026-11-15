@@ -63,7 +63,7 @@ jobs:
         if: github.ref == 'refs/heads/dev'
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/gha-ecr-push
+          role-to-assume: arn:aws:iam::682530816502:role/gha-ecr-push
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to ECR

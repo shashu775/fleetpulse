@@ -9,14 +9,18 @@ spec:
     matchLabels:
       app: dispatch
   template:
-    metadata: 
+    metadata:
       labels:
         app: dispatch
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8000"
     spec:
       containers:
         - name: dispatch
           image: travel2024/dispatch:latest
-          imagePullPolicy: IfNotPresent      # see the note in 05-consignment.yml
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           readinessProbe:
@@ -36,31 +40,31 @@ spec:
             - secretRef:
                 name: fleetpulse-secrets
       initContainers:
-            - name: init-dispatch
-              image: busybox
-              command:
-                - sh
-                - -c
-                - |
-                  timeout=300
-
-                  echo "Waiting for Redis..."
-                  timeout $timeout sh -c 'until nc -z redis-service 6379; do sleep 5; done'
-
-                  echo "Waiting for PostgreSQL..."
-                  timeout $timeout sh -c 'until nc -z postgres-service 5432; do sleep 5; done'
-
-                  echo "Dependencies ready"
+        - name: init-dispatch
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              timeout=300
+              echo "Waiting for Redis..."
+              timeout $timeout sh -c 'until nc -z redis-service 6379; do sleep 5; done'
+              echo "Waiting for PostgreSQL..."
+              timeout $timeout sh -c 'until nc -z postgres-service 5432; do sleep 5; done'
+              echo "Dependencies ready"
 ---
 apiVersion: v1
 kind: Service
 metadata:
   namespace: fleetpulse
   name: dispatch-service
+  labels:
+    app: dispatch
 spec:
   selector:
-    app: dispatch 
+    app: dispatch
   ports:
-    - protocol: TCP 
+    - protocol: TCP
+      name: metrics
       port: 8000
-      targetPort: 8000          
+      targetPort: 8000

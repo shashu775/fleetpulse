@@ -11,14 +11,17 @@ it calls PATCH /api/v1/waybills/{awb}/status.
 import logging
 import os
 import random
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .cache import cache_delete, cache_get, cache_set
 from .db import close_pool, get_conn, init_pool
 from .labels import render_label
+from . import metrics
 from .models import BookingRequest, ScanRequest, StatusUpdate
 
 logging.basicConfig(
@@ -68,6 +71,26 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def collect_http_metrics(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    route = request.scope.get("route")
+    endpoint = route.path if route else "unmatched"
+    metrics.http_requests_total.labels(
+        method=request.method, endpoint=endpoint, status=str(response.status_code)
+    ).inc()
+    metrics.http_request_duration_seconds.labels(
+        method=request.method, endpoint=endpoint
+    ).observe(time.perf_counter() - started)
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # ---------------------------------------------------------------------------

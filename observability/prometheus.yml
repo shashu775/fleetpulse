@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: fleetpulse-consignment
+    metrics_path: /metrics
+    static_configs:
+      - targets: [consignment-service:8000]
+        labels:
+          service: consignment
+
+  - job_name: fleetpulse-dispatch
+    metrics_path: /metrics
+    static_configs:
+      - targets: [dispatch-service:8000]
+        labels:
+          service: dispatch

@@ -41,3 +41,8 @@ dist/
 build/
 bin/
 *.exe
+*.tfplan
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars

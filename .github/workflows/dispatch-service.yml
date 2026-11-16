@@ -75,6 +75,6 @@ jobs:
         if: github.ref == 'refs/heads/dev'
         run: |
           IMAGE=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
-          docker tag local/dispatch:${{ github.sha }} "$IMAGE"
+          docker tag local/dispatch-service:${{ github.sha }} "$IMAGE"
           docker push "$IMAGE"
           echo "### Pushed \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,56 @@
+name: Terraform Pipeline
+
+on:
+  pull_request:
+    branches:
+      - dev
+    paths:
+      - 'infra/environments/dev/terraform/s3/**'
+
+  push:
+    branches:
+      - dev
+    paths:
+      - 'infra/environments/dev/terraform/s3/**'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/environments/dev/terraform/s3/**
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::682530816502:role/github-actions-role
+          aws-region: ap-southeast-2
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Format
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan
+
+      - name: Terraform Apply
+        if: github.event_name == 'push'
+        run: terraform apply -auto-approve

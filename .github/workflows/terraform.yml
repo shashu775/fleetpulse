@@ -23,7 +23,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: infra/environments/dev/terraform/s3/**
+        working-directory: infra/environments/dev/terraform/s3/
 
     steps:
 

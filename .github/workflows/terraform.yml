@@ -39,6 +39,10 @@ jobs:
           role-to-assume: arn:aws:iam::682530816502:role/github-actions-role
           aws-region: ap-southeast-2
 
+      
+      - name: Verify AWS Identity
+        run: aws sts get-caller-identity
+
       - name: Terraform Init
         run: terraform init
 

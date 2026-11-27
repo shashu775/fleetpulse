@@ -39,10 +39,6 @@ jobs:
           role-to-assume: arn:aws:iam::682530816502:role/github-actions-role
           aws-region: ap-southeast-2
 
-<<<<<<< HEAD
-=======
-      
->>>>>>> 18439d3222e7205d7ac945f5b8e9871a000c3e0e
       - name: Verify AWS Identity
         run: aws sts get-caller-identity
 
